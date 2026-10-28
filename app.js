@@ -3,7 +3,7 @@
  * 事業者向け: 車両 / 乗務員（担当車）/ 運用表 / 臨時便 / 設定
  */
 'use strict';
-const APP_VERSION = '2026-10-29';
+const APP_VERSION = '2026-10-29.2';
 
 /* ================= utilities ================= */
 const $ = (s, r = document) => r.querySelector(s);
@@ -192,12 +192,11 @@ function tripsFor(date) {
 }
 
 /* ================= 運用（車両の行路）を自動作成 ================= */
-function blocksFor(date) {
-  if (caches.blocks.has(date)) return caches.blocks.get(date);
-  const { list } = tripsFor(date);
+/* 時刻表から運用を自動で組む（同じ停留所で折り返せる便をつなぐ） */
+function autoBlocks(list) {
   const turn = state.settings.turnaround ?? 1;
-  const blocks = []; const pool = []; // {block, stop, freeAt}
-  for (const trip of list) {
+  const blocks = []; const pool = [];
+  for (const trip of list.slice().sort((a, b) => a.dep - b.dep)) {
     const o = trip.sys.stops[trip.s].stopId, rid = trip.sys.routeId;
     const cands = G.depots.filter((d) => (d.routes || []).includes(rid));
     const okDep = (dep) => !cands.length || cands.some((c) => c.id === dep);
@@ -208,16 +207,61 @@ function blocksFor(date) {
     }
     let blk;
     if (best >= 0) { blk = pool[best].block; pool.splice(best, 1); }
-    else {
-      const dep = (cands.find((c) => c.stopId === o) || cands[0] || G.depots[0]).id;
-      blk = { depot: dep, trips: [] }; blocks.push(blk);
-    }
+    else { blk = { depot: (cands.find((c) => c.stopId === o) || cands[0] || G.depots[0]).id, trips: [] }; blocks.push(blk); }
     blk.trips.push(trip);
     pool.push({ block: blk, stop: trip.sys.stops[trip.e].stopId, freeAt: trip.end });
   }
-  const counter = {};
-  for (const b of blocks) { counter[b.depot] = (counter[b.depot] || 0) + 1; b.no = counter[b.depot]; b.id = b.depot + '-' + b.no; }
-  const r = { blocks, perDepot: counter }; caches.blocks.set(date, r); return r;
+  return blocks;
+}
+/* その日の運用：設定された運用（state.fleet.duties）の便だけを運行する。どの運用にも入っていない便は運休 */
+function blocksFor(date) {
+  if (caches.blocks.has(date)) return caches.blocks.get(date);
+  const { list, byId } = tripsFor(date);
+  const duties = state.fleet?.duties;
+  let blocks;
+  if (Array.isArray(duties)) {
+    const seen = new Set();
+    blocks = duties.map((d) => ({
+      id: d.id, duty: d, depot: d.depot, no: d.no,
+      trips: d.trips.map((id) => byId.get(id)).filter((t) => t && !seen.has(t.id) && seen.add(t.id)).sort((a, b) => a.dep - b.dep),
+    })).filter((b) => b.trips.length);
+  } else {
+    blocks = autoBlocks(list); const c = {};
+    for (const b of blocks) { c[b.depot] = (c[b.depot] || 0) + 1; b.no = String(c[b.depot]); b.id = b.depot + '-' + b.no; }
+  }
+  const assigned = new Set(blocks.flatMap((b) => b.trips.map((t) => t.id)));
+  const unassigned = list.filter((t) => !assigned.has(t.id));
+  const counter = {}; for (const b of blocks) counter[b.depot] = (counter[b.depot] || 0) + 1;
+  const r = { blocks, perDepot: counter, unassigned }; caches.blocks.set(date, r); return r;
+}
+/* 運用の初期設定：案内データに運用があればそれを、なければ時刻表から自動で作る（臨時便は日付ごとに臨時運用を作る） */
+function dutiesFromGuide() {
+  const ops = G.D.operations?.duties; if (!Array.isArray(ops) || !ops.length) return null;
+  const ids = new Set(G.baseTrips.map((t) => t.id)); const out = [];
+  ops.forEach((d, i) => {
+    const found = [];
+    const walk = (x) => { if (typeof x === 'string') { if (ids.has(x) && !found.includes(x)) found.push(x); } else if (Array.isArray(x)) x.forEach(walk); else if (x && typeof x === 'object') Object.values(x).forEach(walk); };
+    walk(d); if (!found.length) return;
+    let depot = G.depots.find((p) => p.id === (d.depotId || d.depot))?.id;
+    if (!depot) { const t = G.baseTrips.find((x) => x.id === found[0]); depot = (G.depots.find((p) => (p.routes || []).includes(t.sys.routeId)) || G.depots[0]).id; }
+    out.push({ id: 'g' + (d.id || i), depot, no: String(d.name || d.no || d.label || i + 1), trips: found });
+  });
+  return out.length ? out : null;
+}
+function makeDuties(blocks, prefix = '', startNo = {}) {
+  const c = { ...startNo };
+  return blocks.map((b) => { c[b.depot] = (c[b.depot] || 0) + 1; return { id: uid('du'), depot: b.depot, no: prefix + c[b.depot], trips: b.trips.map((t) => t.id) }; });
+}
+function initialDuties() {
+  const base = dutiesFromGuide() || makeDuties(autoBlocks(G.baseTrips));
+  const dates = [...new Set(state.temps.map((t) => t.date))];
+  for (const ds of dates) base.push(...tempDuties(state.temps.filter((t) => t.date === ds), base));
+  return base;
+}
+function tempDuties(temps, existing = state.fleet.duties || []) {
+  const trips = temps.map(makeTempTrip).filter(Boolean); if (!trips.length) return [];
+  const used = {}; for (const d of existing) { const m = /^臨(\d+)$/.exec(d.no); if (m) used[d.depot] = Math.max(used[d.depot] || 0, +m[1]); }
+  return makeDuties(autoBlocks(trips), '臨', used);
 }
 function depotName(id) { return G.depots.find((d) => d.id === id)?.name || '（未設定）'; }
 function depotShort(id) { const n = depotName(id); const m = /営業所(.+)$/.exec(n); return m ? m[1] : n; }
@@ -351,6 +395,9 @@ function simDay(date) {
       runBlock(info, 0, r.vehicle, r.driver, false);
     }
   }
+  // 運用が設定されていない便は運休
+  const { unassigned } = blocksFor(date);
+  if (unassigned.length) { const none = { block: { id: 'none', depot: null, no: '—', trips: unassigned }, sims: [] }; for (const trip of unassigned) addCancel(none, trip, '運用未設定', -Infinity); }
   // 事故：時刻順に処理。次の便は運休、以降は車庫の担当なし車両で代走（回送が間に合う便から）
   while (pending.length) {
     pending.sort((a, b) => a.t - b.t);
@@ -737,6 +784,8 @@ function defaultFleet() {
     const nv = state.fleet.vehicles.filter((v) => v.depot === dep.id).length;
     state.fleet.drivers.push(...genDrivers(Math.round(nv * 1.9), { depot: dep.id, ageMin: 19, ageMax: 90, maleRatio: 65 }, rng, '2026-10-27'));
   }
+  state.fleet.duties = dutiesFromGuide() || makeDuties(autoBlocks(G.baseTrips));
+  caches.blocks.clear();
   autoAssign();
   caches.blocks.clear();
   return state.fleet;
@@ -746,10 +795,14 @@ function loadFleet() {
   const saved = LS.get('fleet', null);
   if (saved && Array.isArray(saved.vehicles)) state.fleet = saved;
   else if (pub && Array.isArray(pub.vehicles)) {
-    state.fleet = { vehicles: pub.vehicles, drivers: pub.drivers || [] };
+    state.fleet = { vehicles: pub.vehicles, drivers: pub.drivers || [], duties: Array.isArray(pub.duties) ? pub.duties : undefined };
     if (!LS.get('temps', null) && Array.isArray(pub.temps)) state.temps = pub.temps;
     if (!LS.get('settings', null) && pub.settings) state.settings = Object.assign({}, DEFAULT_SETTINGS, pub.settings);
   } else defaultFleet();
+  const baseIds = new Set(G.baseTrips.map((t) => t.id));
+  const stale = Array.isArray(state.fleet.duties) && state.fleet.duties.length && !state.fleet.duties.some((d) => d.trips.some((id) => baseIds.has(id)));
+  if (!Array.isArray(state.fleet.duties) || stale) { state.fleet.duties = initialDuties(); if (saved) LS.set('fleet', state.fleet); }
+  caches.blocks.clear(); caches.sim.clear();
 }
 
 /* ================= UI helpers ================= */
@@ -1627,7 +1680,7 @@ function drawDrivers() {
     <div class="panel"><div class="small muted">担当車が未設定</div><div style="font-size:22px;font-weight:700">${noVeh}人</div></div>`;
   const q = ad.q.trim();
   let rows = all.filter((d) => (ad.depot === 'all' || d.depot === ad.depot) && (ad.gender === 'all' || d.gender === ad.gender) && (!q || [d.empNo, d.sur + d.given, d.sur + ' ' + d.given, vno.get(d.vehicleId) || ''].join(' ').includes(q)));
-  rows = sortRows(rows, ad.sort, ad.dir, { empNo: (d) => d.empNo, name: (d) => d.sur + d.given, gender: (d) => d.gender, birth: (d) => d.birth, age: (d) => ageOn(d.birth, today), depot: (d) => depotName(d.depot), hired: (d) => d.hired, skill: (d) => d.skill, service: (d) => d.service, veh: (d) => vno.get(d.vehicleId) || '￿' });
+  rows = sortRows(rows, ad.sort, ad.dir, { empNo: (d) => d.empNo, name: (d) => d.sur + d.given, gender: (d) => d.gender, birth: (d) => d.birth, age: (d) => ageOn(d.birth, today), depot: (d) => depotName(d.depot), hired: (d) => d.hired, skill: (d) => d.skill, service: (d) => d.service, veh: (d) => vno.get(d.vehicleId) || ' ' });
   const per = 100, pages = Math.max(1, Math.ceil(rows.length / per)); ad.page = clamp(ad.page, 0, pages - 1);
   const pageRows = rows.slice(ad.page * per, ad.page * per + per);
   const th = (k, n) => `<th data-sort="${k}" aria-sort="${ad.sort === k ? (ad.dir > 0 ? 'ascending' : 'descending') : 'none'}">${n}${ad.sort === k ? (ad.dir > 0 ? ' ▲' : ' ▼') : ''}</th>`;
@@ -1703,8 +1756,11 @@ let blkDate = null;
 function admBlocks() {
   blkDate ||= serviceNow(true).date;
   const box = $('#adm');
-  const sd = simDay(blkDate);
-  const rows = sd.byBlock.slice().sort((a, b) => a.block.depot.localeCompare(b.block.depot) || a.block.no - b.block.no);
+  const sd = simDay(blkDate); const { unassigned } = blocksFor(blkDate);
+  const cmpNo = (a, b) => String(a).localeCompare(String(b), 'ja', { numeric: true });
+  const rows = sd.byBlock.slice().sort((a, b) => a.block.depot.localeCompare(b.block.depot) || cmpNo(a.block.no, b.block.no));
+  const shownIds = new Set(rows.map((r) => r.block.id));
+  const idle = state.fleet.duties.filter((d) => !shownIds.has(d.id) && !(d.trips.length && d.trips.every((id) => id.startsWith('tmp_'))));
   const evCount = (b, type) => b.sims.reduce((n, s) => n + s.events.filter((e) => e.type === type).length, 0);
   const cancelCount = (b) => b.sims.filter((s) => s.cancelled).length;
   const totalAcc = rows.reduce((n, b) => n + evCount(b, 'accident'), 0), totalTr = rows.reduce((n, b) => n + evCount(b, 'trouble'), 0);
@@ -1713,32 +1769,102 @@ function admBlocks() {
   const noV = rows.filter((b) => !b.vehicle).length, noD = rows.filter((b) => b.vehicle && !b.driver).length;
   const spare = G.depots.map((d) => `${esc(depotShort(d.id))} 車両${sd.pools[d.id]?.vehicles.length ?? 0}台・乗務員${sd.pools[d.id]?.drivers.length ?? 0}人`).join('　');
   box.innerHTML = `<div class="row" style="margin-bottom:12px;align-items:flex-end"><label class="field" style="width:170px"><span>日付</span><input type="date" id="bDate" value="${blkDate}"></label>
-    <p class="small muted grow" style="margin:0">運用は時刻表から自動で組み立てています。担当乗務員のいる車両から順に運用へ入り、担当者が非番・不在の車両には予備の乗務員が乗ります。車両か乗務員が足りない運用は終日運休です。事故が起きると次の便は運休になり、以降は車庫にいる担当なしの車両と予備の乗務員で代走します（回送が間に合わない便は運休）。</p></div>
+    <div class="row grow" style="justify-content:flex-end"><button class="btn" id="bAdd">運用を追加</button>${unassigned.length ? '<button class="btn" id="bFill">運用未設定の便から運用を作る</button>' : ''}<button class="btn danger" id="bReset">運用を作り直す</button></div></div>
+    <p class="note" style="margin:0 0 12px">運用に入っている便だけが運行し、どの運用にも入っていない便は「運用未設定」で運休になります。運用の行を押すと、便の追加・取り外し、名前や所属の変更ができます。担当乗務員のいる車両から順に運用へ入り、1人の乗務員は1日1運用までです。車両か乗務員が足りない運用は終日運休、事故の後は担当なしの予備車で代走します（回送が間に合わない便は運休）。</p>
     <div class="grid2" style="margin-bottom:14px">
       <div class="panel"><div class="small muted">運用数</div><div style="font-size:22px;font-weight:700">${rows.length}</div>${noV || noD ? `<div class="small" style="color:var(--danger)">${noV ? `車両不足 ${noV}運用` : ''}${noV && noD ? '・' : ''}${noD ? `乗務員不足 ${noD}運用` : ''}</div>` : ''}</div>
       <div class="panel"><div class="small muted">運休</div><div style="font-size:22px;font-weight:700">${cancels.length}便 <span class="small muted" style="font-weight:400">／ ${allSims.length}便</span></div>${cancels.length ? `<div class="small muted">${Object.entries(byReason).map(([k, v]) => `${esc(k)} ${v}`).join('・')}</div>` : ''}</div>
       <div class="panel"><div class="small muted">事故・乗客対応</div><div style="font-size:22px;font-weight:700">${totalAcc}件・${totalTr}件</div></div>
       <div class="panel"><div class="small muted">終日残った予備</div><div class="small" style="margin-top:4px">${spare}</div></div>
     </div>
+    ${unassigned.length ? `<section class="panel stack" style="margin-bottom:14px;border-color:var(--danger)"><h2 style="font-size:16px">運用が設定されていない便（${unassigned.length}本・運休）</h2>
+      <div class="tablewrap" style="max-height:320px;overflow:auto"><table class="data"><thead><tr><th>発車</th><th>系統</th><th>行先</th><th>区間</th><th>運用に入れる</th></tr></thead><tbody>${unassigned.map((t) => `<tr><td>${fmt(t.dep)}</td><td>${routeBadge(t.sys)}${t.temp ? ' <span class="tag temp">臨</span>' : ''}</td><td>${esc(tripDestName(t))}</td><td>${esc(stopName(t.sys.stops[t.s].stopId))} → ${esc(stopName(t.sys.stops[t.e].stopId))}（〜${fmt(t.end)}）</td><td><div class="row" style="flex-wrap:nowrap;gap:6px"><select data-ua="${esc(t.id)}" style="min-height:34px;padding:4px 8px;width:auto">${dutyOptions(t)}</select><button class="btn sm" data-uadd="${esc(t.id)}">入れる</button></div></td></tr>`).join('')}</tbody></table></div></section>` : ''}
     <div class="tablewrap"><table class="data"><thead><tr><th>運用</th><th>車番</th><th>乗務員</th><th>運転/接客</th><th>便数</th><th>始発〜最終</th><th>最大の遅れ</th><th>事象</th></tr></thead><tbody>${rows.map((b, i) => {
       const ok = b.sims.filter((s) => !s.cancelled && !s.accident);
       const maxDelay = Math.max(0, ...ok.map((s) => Math.round(s.arr[s.trip.e] - s.trip.times[s.trip.e][0])));
       const acc = evCount(b, 'accident'), tr = evCount(b, 'trouble'), cn = cancelCount(b);
-      return `<tr data-i="${i}" style="cursor:pointer"><td><b>${esc(depotShort(b.block.depot))} ${b.block.no}</b></td><td>${b.vehicle ? esc(b.vehicle.no) : '<span style="color:var(--danger)">車両不足</span>'}${b.subs.length ? `<span class="small muted"> → ${b.subs.map((x) => esc(x.vehicle.no)).join('、')}</span>` : ''}</td><td>${b.driver ? esc(driverName(b.driver)) + (b.spareDriver ? ' <span class="small muted">予備</span>' : '') : b.vehicle ? '<span style="color:var(--danger)">乗務員不足</span>' : '—'}</td><td>${b.driver ? `${b.driver.skill} / ${b.driver.service}` : '—'}</td><td class="num">${b.block.trips.length}</td><td>${fmt(b.block.trips[0].dep)}〜${fmt(b.block.trips[b.block.trips.length - 1].end)}</td><td class="num">${maxDelay ? maxDelay + '分' : '—'}</td><td>${acc ? '<span class="tag stop">事故</span> ' : ''}${cn ? `<span class="tag temp">運休${cn}</span> ` : ''}${tr ? `<span class="tag late">対応${tr}</span>` : ''}</td></tr>`;
-    }).join('')}</tbody></table></div>`;
+      const warn = dutyWarnings(b.block.trips).length;
+      return `<tr data-id="${esc(b.block.id)}" style="cursor:pointer"><td><b>${esc(depotShort(b.block.depot))} ${esc(b.block.no)}</b>${warn ? ' <span class="tag temp" title="つながりを確認してください">要確認</span>' : ''}</td><td>${b.vehicle ? esc(b.vehicle.no) : '<span style="color:var(--danger)">車両不足</span>'}${b.subs.length ? `<span class="small muted"> → ${b.subs.map((x) => esc(x.vehicle.no)).join('、')}</span>` : ''}</td><td>${b.driver ? esc(driverName(b.driver)) + (b.spareDriver ? ' <span class="small muted">予備</span>' : '') : b.vehicle ? '<span style="color:var(--danger)">乗務員不足</span>' : '—'}</td><td>${b.driver ? `${b.driver.skill} / ${b.driver.service}` : '—'}</td><td class="num">${b.block.trips.length}</td><td>${fmt(b.block.trips[0].dep)}〜${fmt(b.block.trips[b.block.trips.length - 1].end)}</td><td class="num">${maxDelay ? maxDelay + '分' : '—'}</td><td>${acc ? '<span class="tag stop">事故</span> ' : ''}${cn ? `<span class="tag temp">運休${cn}</span> ` : ''}${tr ? `<span class="tag late">対応${tr}</span>` : ''}</td></tr>`;
+    }).join('')}${idle.map((d) => `<tr data-id="${esc(d.id)}" style="cursor:pointer;opacity:.6"><td><b>${esc(depotShort(d.depot))} ${esc(d.no)}</b></td><td colspan="7" class="muted">この日に運行する便がありません</td></tr>`).join('')}</tbody></table></div>`;
   $('#bDate').onchange = (e) => { if (e.target.value) { blkDate = e.target.value; admBlocks(); } };
-  $$('tr[data-i]', box).forEach((tr) => tr.onclick = () => showBlock(rows[+tr.dataset.i]));
+  $$('tr[data-id]', box).forEach((tr) => tr.onclick = () => openDuty(tr.dataset.id));
+  $$('[data-uadd]', box).forEach((b) => b.onclick = () => {
+    const did = $(`[data-ua="${CSS.escape(b.dataset.uadd)}"]`, box).value; const d = state.fleet.duties.find((x) => x.id === did);
+    if (!d) { toast('入れる運用を選んでください'); return; }
+    d.trips.push(b.dataset.uadd); saveFleet(); toast(`運用 ${depotShort(d.depot)} ${d.no} に入れました`); admBlocks();
+  });
+  $('#bAdd').onclick = () => {
+    const dl = modal('運用を追加', `<form class="stack" id="na"><div class="grid2"><label class="field"><span>所属</span><select name="depot">${depotOptions(G.depots[0].id)}</select></label><label class="field"><span>運用名</span><input type="text" name="no" maxlength="12" required></label></div><p class="note">追加したあと、運用の画面から便を入れてください。</p></form>`, { foot: '<button class="btn" data-close>キャンセル</button><button class="btn primary" id="naGo">追加する</button>' });
+    const f = $('#na', dl); const suggest = () => { const nums = state.fleet.duties.filter((d) => d.depot === f.depot.value).map((d) => +d.no).filter(Number.isFinite); f.no.value = String((nums.length ? Math.max(...nums) : 0) + 1); };
+    f.depot.onchange = suggest; suggest();
+    $('#naGo', dl).onclick = () => {
+      const no = f.no.value.trim(); if (!no) { toast('運用名を入力してください'); return; }
+      if (state.fleet.duties.some((d) => d.depot === f.depot.value && d.no === no)) { toast('同じ名前の運用があります'); return; }
+      const d = { id: uid('du'), depot: f.depot.value, no, trips: [] }; state.fleet.duties.push(d); saveFleet(); dl.close(); admBlocks(); openDuty(d.id);
+    };
+  };
+  const fill = $('#bFill'); if (fill) fill.onclick = () => {
+    const base = unassigned.filter((t) => !t.temp), tmp = unassigned.filter((t) => t.temp);
+    const maxNo = {}; for (const d of state.fleet.duties) if (/^\d+$/.test(d.no)) maxNo[d.depot] = Math.max(maxNo[d.depot] || 0, +d.no);
+    const add = makeDuties(autoBlocks(base), '', maxNo);
+    const maxT = {}; for (const d of state.fleet.duties) { const m = /^臨(\d+)$/.exec(d.no); if (m) maxT[d.depot] = Math.max(maxT[d.depot] || 0, +m[1]); }
+    add.push(...makeDuties(autoBlocks(tmp), '臨', maxT));
+    state.fleet.duties.push(...add); saveFleet(); toast(`${add.length}運用を追加しました`); admBlocks();
+  };
+  $('#bReset').onclick = async () => {
+    if (!(await confirmBox('いまの運用の設定をすべて消して、最初の状態（案内データに運用があればそれ、なければ時刻表から自動で作成。臨時便には臨時運用）に作り直します。', '作り直す'))) return;
+    state.fleet.duties = initialDuties(); saveFleet(); toast('運用を作り直しました'); admBlocks();
+  };
 }
-function showBlock(b) {
+function dutyOptions(trip) {
+  const ok = state.fleet.duties.filter((d) => { const dep = G.depots.find((x) => x.id === d.depot); return !dep || !(dep.routes || []).length || dep.routes.includes(trip.sys.routeId); });
+  const list = (ok.length ? ok : state.fleet.duties).slice().sort((a, b) => a.depot.localeCompare(b.depot) || String(a.no).localeCompare(String(b.no), 'ja', { numeric: true }));
+  return '<option value="">運用を選ぶ</option>' + list.map((d) => `<option value="${esc(d.id)}">${esc(depotShort(d.depot))} ${esc(d.no)}</option>`).join('');
+}
+function dutyWarnings(trips) {
+  const turn = state.settings.turnaround ?? 1; const w = [];
+  for (let i = 1; i < trips.length; i++) {
+    const a = trips[i - 1], b = trips[i];
+    const aEnd = a.sys.stops[a.e].stopId, bStart = b.sys.stops[b.s].stopId;
+    if (a.end + turn > b.dep) w.push(`${fmt(b.dep)}発の便は、前の便の到着（${fmt(a.end)}）に間に合いません。`);
+    else if (aEnd !== bStart) w.push(`${fmt(a.end)} ${stopName(aEnd)} 着 → ${fmt(b.dep)} ${stopName(bStart)} 発：停留所が違うため回送が必要です。`);
+  }
+  return w;
+}
+function openDuty(dutyId) {
+  const duty = state.fleet.duties.find((d) => d.id === dutyId); if (!duty) return;
+  const sd = simDay(blkDate);
+  const b = sd.byBlock.find((x) => x.block.id === dutyId) || { block: { id: duty.id, duty, depot: duty.depot, no: duty.no, trips: [] }, vehicle: null, driver: null, sims: [], subs: [] };
+  const { unassigned } = blocksFor(blkDate);
+  const cand = unassigned.filter((t) => { const dep = G.depots.find((x) => x.id === duty.depot); return !dep || !(dep.routes || []).length || dep.routes.includes(t.sys.routeId); });
+  const warns = dutyWarnings(b.block.trips);
   const subs = b.subs.map((x) => `<br>${fmt(x.t)}ごろの事故のあと、${esc(x.vehicle.no)}（${esc(driverName(x.driver))}）が代走`).join('');
-  const body = `<p class="small muted" style="margin-top:0">${esc(depotName(b.block.depot))}　車番 ${b.vehicle ? esc(b.vehicle.no) : 'なし（車両不足）'}　乗務員 ${b.driver ? esc(driverName(b.driver)) + `（運転${b.driver.skill}・接客${b.driver.service}${b.spareDriver ? '・予備' : ''}）` : 'なし'}${subs}</p>
-    <div class="tablewrap"><table class="data"><thead><tr><th>系統</th><th>行先</th><th>予定発</th><th>実際の発</th><th>予定着</th><th>実際の着</th><th>車番</th><th>できごと</th></tr></thead><tbody>${b.sims.map((s) => {
-      const t = s.trip;
-      if (s.cancelled) return `<tr style="opacity:.7"><td>${routeBadge(t.sys)}${t.temp ? ' <span class="tag temp">臨</span>' : ''}</td><td>${esc(tripDestName(t))}</td><td>${fmt(t.dep)}</td><td>—</td><td>${fmt(t.end)}</td><td><span class="tag stop">運休</span></td><td>—</td><td style="white-space:normal;min-width:200px">${esc(s.cancelled.reason)}</td></tr>`;
+  const body = `<form class="row" id="du" style="margin-bottom:10px" autocomplete="off"><label class="field" style="width:140px"><span>運用名</span><input type="text" name="no" value="${esc(duty.no)}" maxlength="12"></label><label class="field" style="width:220px"><span>所属</span><select name="depot">${depotOptions(duty.depot)}</select></label><button class="btn" type="submit">変更を保存</button><button class="btn danger" type="button" id="duDel" style="margin-left:auto">この運用を削除</button></form>
+    <p class="small muted" style="margin-top:0">${dateJa(blkDate)}　車番 ${b.vehicle ? esc(b.vehicle.no) : b.sims.length ? 'なし（車両不足）' : '—'}　乗務員 ${b.driver ? esc(driverName(b.driver)) + `（運転${b.driver.skill}・接客${b.driver.service}${b.spareDriver ? '・予備' : ''}）` : 'なし'}${subs}</p>
+    ${warns.length ? `<div class="note" style="border-color:var(--warn);margin-bottom:10px">${warns.map(esc).join('<br>')}</div>` : ''}
+    ${b.sims.length ? `<div class="tablewrap"><table class="data"><thead><tr><th>系統</th><th>行先</th><th>予定発</th><th>実際の発</th><th>予定着</th><th>実際の着</th><th>車番</th><th>できごと</th><th></th></tr></thead><tbody>${b.sims.map((s) => {
+      const t = s.trip; const rm = `<td><button class="btn sm" data-rm="${esc(t.id)}" title="この運用から外す（運休になります）">外す</button></td>`;
+      if (s.cancelled) return `<tr style="opacity:.7"><td>${routeBadge(t.sys)}${t.temp ? ' <span class="tag temp">臨</span>' : ''}</td><td>${esc(tripDestName(t))}</td><td>${fmt(t.dep)}</td><td>—</td><td>${fmt(t.end)}</td><td><span class="tag stop">運休</span></td><td>—</td><td style="white-space:normal;min-width:180px">${esc(s.cancelled.reason)}</td>${rm}</tr>`;
       const a = s.accident ? null : s.arr[t.e];
-      return `<tr><td>${routeBadge(t.sys)}${t.temp ? ' <span class="tag temp">臨</span>' : ''}</td><td>${esc(tripDestName(t))}</td><td>${fmt(t.dep)}</td><td>${fmt(s.dep[t.s])}</td><td>${fmt(t.end)}</td><td>${a == null ? '<span class="tag stop">打ち切り</span>' : `${fmt(a)}${a - t.end >= 1 ? ` <span class="tag late">+${Math.round(a - t.end)}</span>` : ''}`}</td><td>${s.vehicle ? esc(s.vehicle.no) : '—'}${s.substitute ? ' <span class="small muted">代走</span>' : ''}</td><td style="white-space:normal;min-width:200px">${s.events.filter((e) => e.type !== 'jam').map((e) => esc(e.text)).join('<br>')}${s.events.some((e) => e.type === 'jam') ? `${s.events.some((e) => e.type !== 'jam') ? '<br>' : ''}<span class="small muted">${s.events.filter((e) => e.type === 'jam').length}区間で混雑</span>` : ''}</td></tr>`;
-    }).join('')}</tbody></table></div>`;
-  modal(`運用 ${esc(depotShort(b.block.depot))} ${b.block.no}`, body, { wide: true });
+      return `<tr><td>${routeBadge(t.sys)}${t.temp ? ' <span class="tag temp">臨</span>' : ''}</td><td>${esc(tripDestName(t))}</td><td>${fmt(t.dep)}</td><td>${fmt(s.dep[t.s])}</td><td>${fmt(t.end)}</td><td>${a == null ? '<span class="tag stop">打ち切り</span>' : `${fmt(a)}${a - t.end >= 1 ? ` <span class="tag late">+${Math.round(a - t.end)}</span>` : ''}`}</td><td>${s.vehicle ? esc(s.vehicle.no) : '—'}${s.substitute ? ' <span class="small muted">代走</span>' : ''}</td><td style="white-space:normal;min-width:180px">${s.events.filter((e) => e.type !== 'jam').map((e) => esc(e.text)).join('<br>')}${s.events.some((e) => e.type === 'jam') ? `${s.events.some((e) => e.type !== 'jam') ? '<br>' : ''}<span class="small muted">${s.events.filter((e) => e.type === 'jam').length}区間で混雑</span>` : ''}</td>${rm}</tr>`;
+    }).join('')}</tbody></table></div>` : '<div class="panel empty">この日に運行する便はありません。</div>'}
+    <div class="row" style="margin-top:12px;align-items:flex-end"><label class="field grow" style="min-width:240px"><span>運用未設定の便を追加（${cand.length}本）</span><select id="duAddSel">${cand.length ? cand.map((t) => `<option value="${esc(t.id)}">${fmt(t.dep)} ${esc(t.sys.no)} ${esc(stopName(t.sys.stops[t.s].stopId))} → ${esc(tripDestName(t))}（〜${fmt(t.end)}）${t.temp ? '【臨】' : ''}</option>`).join('') : '<option value="">追加できる便はありません</option>'}</select></label><button class="btn primary" id="duAdd" ${cand.length ? '' : 'disabled'}>追加する</button></div>
+    <p class="small muted">便を外すと、どの運用にも入っていない便になり運休します。運用はダイヤの毎日に共通です（臨時便はその日だけ）。</p>`;
+  const dl = modal(`運用 ${esc(depotShort(duty.depot))} ${esc(duty.no)}`, body, { wide: true });
+  const reopen = () => { dl.close(); admBlocks(); openDuty(dutyId); };
+  $('#du', dl).onsubmit = (e) => {
+    e.preventDefault(); const f = e.target; const no = f.no.value.trim();
+    if (!no) { toast('運用名を入力してください'); return; }
+    if (state.fleet.duties.some((d) => d.id !== duty.id && d.depot === f.depot.value && d.no === no)) { toast('同じ名前の運用があります'); return; }
+    duty.no = no; duty.depot = f.depot.value; saveFleet(); toast('運用を保存しました'); reopen();
+  };
+  $('#duDel', dl).onclick = async () => {
+    dl.close();
+    if (!(await confirmBox(`運用「${esc(depotShort(duty.depot))} ${esc(duty.no)}」を削除します。入っていた便（${duty.trips.length}本）は運用未設定になり運休します。`, '削除する'))) { openDuty(dutyId); return; }
+    state.fleet.duties = state.fleet.duties.filter((d) => d.id !== duty.id); saveFleet(); toast('運用を削除しました'); admBlocks();
+  };
+  $$('[data-rm]', dl).forEach((btn) => btn.onclick = () => { duty.trips = duty.trips.filter((id) => id !== btn.dataset.rm); saveFleet(); toast('便を運用から外しました（運休）'); reopen(); });
+  $('#duAdd', dl).onclick = () => { const id = $('#duAddSel', dl).value; if (!id) return; duty.trips.push(id); saveFleet(); toast('便を運用に追加しました'); reopen(); };
 }
 
 /* ---- 臨時便 ---- */
@@ -1756,6 +1882,7 @@ function admTemps() {
         <label class="field"><span>本数</span><input type="number" name="count" value="1" min="1" max="60"></label>
         <label class="field"><span>運行間隔（分）</span><input type="number" name="every" value="15" min="1" max="240"></label>
         <label class="field"><span>理由・備考</span><input type="text" name="note" placeholder="例：花火大会の観客輸送" maxlength="40"></label>
+        <label class="field" style="grid-column:span 2;min-width:0"><span>運用</span><select name="duty"><option value="new">臨時運用を自動で作る（便をつないで必要な数だけ）</option><option value="none">運用に入れない（あとで運用表で設定。それまでは運休）</option></select></label>
       </div>
       <p class="small muted" id="tfPrev" style="margin:0"></p>
       <div><button class="btn primary" type="submit">臨時便を追加する</button></div>
@@ -1783,10 +1910,23 @@ function admTemps() {
     if (b <= a || dep == null || !f.date.value) { toast('入力内容を確認してください'); return; }
     if (dep < 180) dep += 1440;
     const n = clamp(+f.count.value || 1, 1, 60), ev = clamp(+f.every.value || 15, 1, 240);
-    for (let k = 0; k < n; k++) state.temps.push({ id: uid('t'), sys: f.sys.value, date: f.date.value, dep: dep + k * ev, from: a, to: b, note: f.note.value.trim() });
+    const added = [];
+    for (let k = 0; k < n; k++) added.push({ id: uid('t'), sys: f.sys.value, date: f.date.value, dep: dep + k * ev, from: a, to: b, note: f.note.value.trim() });
+    state.temps.push(...added);
+    if (f.duty.value === 'new') { state.fleet.duties.push(...tempDuties(added)); saveFleet(); }
     saveTemps(); toast(`臨時便を${n}本追加しました`); drawTemps();
   };
   drawTemps();
+}
+/* 削除した臨時便を運用から外し、空になった運用（臨時便だけだったもの）を消す */
+function pruneTempDuties() {
+  const ids = new Set(state.temps.map((t) => 'tmp_' + t.id));
+  state.fleet.duties = state.fleet.duties.filter((d) => {
+    const had = d.trips.some((id) => id.startsWith('tmp_'));
+    d.trips = d.trips.filter((id) => !id.startsWith('tmp_') || ids.has(id));
+    return !(had && d.trips.length === 0);
+  });
+  LS.set('fleet', state.fleet);
 }
 function drawTemps() {
   const today = serviceNow(true).date;
@@ -1798,8 +1938,8 @@ function drawTemps() {
       const tr = makeTempTrip(t);
       return `<tr style="${t.date < today ? 'opacity:.55' : ''}"><td>${dateJa(t.date)}</td><td>${routeBadge(s)}</td><td>${esc(stopName(s.stops[tr.s].stopId))} → ${esc(stopName(s.stops[tr.e].stopId))}</td><td>${fmt(tr.dep)}</td><td>${fmt(tr.end)}</td><td>${esc(t.note)}</td><td><button class="btn sm danger" data-del="${esc(t.id)}">削除</button></td></tr>`;
     }).join('')}</tbody></table></div>` : '<div class="panel empty">臨時便はまだありません。上のフォームから追加できます。</div>';
-  $$('#tList [data-del]').forEach((b) => b.onclick = () => { state.temps = state.temps.filter((t) => t.id !== b.dataset.del); saveTemps(); toast('臨時便を削除しました'); drawTemps(); });
-  const tp = $('#tPast'); if (tp) tp.onclick = () => { state.temps = state.temps.filter((t) => t.date >= today); saveTemps(); toast('過去の臨時便を削除しました'); drawTemps(); };
+  $$('#tList [data-del]').forEach((b) => b.onclick = () => { state.temps = state.temps.filter((t) => t.id !== b.dataset.del); pruneTempDuties(); saveTemps(); toast('臨時便を削除しました'); drawTemps(); });
+  const tp = $('#tPast'); if (tp) tp.onclick = () => { state.temps = state.temps.filter((t) => t.date >= today); pruneTempDuties(); saveTemps(); toast('過去の臨時便を削除しました'); drawTemps(); };
 }
 
 /* ---- 設定 ---- */
@@ -1844,13 +1984,13 @@ function admSettings() {
     </div>
     <div class="panel stack">
       <h2 style="font-size:17px">データの保存と公開</h2>
-      <p class="small muted" style="margin:0">車両・乗務員・臨時便・設定は、このブラウザ内に保存されています。公開サイトの閲覧者にも同じデータを見せるには、「公開用 fleet.js を書き出す」で作ったファイルをリポジトリの fleet.js と置き換えてください。</p>
+      <p class="small muted" style="margin:0">車両・乗務員・運用・臨時便・設定は、このブラウザ内に保存されています。公開サイトの閲覧者にも同じデータを見せるには、「公開用 fleet.js を書き出す」で作ったファイルをリポジトリの fleet.js と置き換えてください。</p>
       <div class="row"><button class="btn" id="exJson">バックアップを書き出す（JSON）</button><button class="btn" id="imJson">バックアップを読み込む</button><button class="btn primary" id="exFleet">公開用 fleet.js を書き出す</button></div>
       <h3 style="font-size:15px;margin-top:8px">案内データ（路線・時刻表）</h3>
       <p class="small muted" style="margin:0">現在のデータ：${esc(G.D.project || '')}（${esc((G.D.generatedAt || '').slice(0, 10))} 作成、停留所 ${G.D.stops.length}・系統 ${G.D.systems.length}・便 ${G.D.trips.length}）${LS.get('guideOverride', null) ? '　<b>このブラウザで差し替え中</b>' : ''}</p>
       <div class="row"><button class="btn" id="imGuide">案内データを差し替える（JSON）</button>${LS.get('guideOverride', null) ? '<button class="btn" id="rsGuide">元の案内データに戻す</button>' : ''}</div>
       <h3 style="font-size:15px;margin-top:8px">初期化</h3>
-      <div class="row"><button class="btn danger" id="rsAll">車両・乗務員・臨時便・設定をすべて初期状態に戻す</button></div>
+      <div class="row"><button class="btn danger" id="rsAll">車両・乗務員・運用・臨時便・設定をすべて初期状態に戻す</button></div>
     </div>`;
   const f = $('#sf');
   f.onsubmit = (e) => {
@@ -1892,7 +2032,7 @@ function admSettings() {
   $('#mdImport').onclick = () => importCsv('modelCsv', parseModelCSV, '車種テンプレート');
   const plr = $('#plReset'); if (plr) plr.onclick = () => { LS.del('plateCsv'); loadRefData(); toast('元のナンバー表に戻しました'); admSettings(); };
   const mdr = $('#mdReset'); if (mdr) mdr.onclick = () => { LS.del('modelCsv'); loadRefData(); toast('元の車種テンプレートに戻しました'); admSettings(); };
-  const bundle = () => ({ format: 'ichika-fleet', version: 2, exportedAt: new Date().toISOString(), vehicles: state.fleet.vehicles, drivers: state.fleet.drivers, temps: state.temps, settings: state.settings, plateCsv: LS.get('plateCsv', null) || undefined, modelCsv: LS.get('modelCsv', null) || undefined });
+  const bundle = () => ({ format: 'ichika-fleet', version: 2, exportedAt: new Date().toISOString(), vehicles: state.fleet.vehicles, drivers: state.fleet.drivers, duties: state.fleet.duties, temps: state.temps, settings: state.settings, plateCsv: LS.get('plateCsv', null) || undefined, modelCsv: LS.get('modelCsv', null) || undefined });
   $('#exJson').onclick = () => download(`一花交通_事業者データ_${dateStr(new Date())}.json`, JSON.stringify(bundle(), null, 1));
   $('#exFleet').onclick = () => download('fleet.js', `/* 一花交通 事業者データ（公開用）。事業者用ページの「公開用 fleet.js を書き出す」で作成。 */\nwindow.FLEET_DATA = ${JSON.stringify(bundle())};\n`, 'text/javascript');
   $('#imJson').onclick = async () => {
@@ -1900,7 +2040,7 @@ function admSettings() {
     try {
       const o = JSON.parse(txt); if (!Array.isArray(o.vehicles) || !Array.isArray(o.drivers)) throw new Error();
       if (!(await confirmBox(`車両 ${o.vehicles.length}台・乗務員 ${o.drivers.length}人・臨時便 ${(o.temps || []).length}本のデータで、いまのデータを置き換えます。`, '置き換える'))) return;
-      state.fleet = { vehicles: o.vehicles, drivers: o.drivers }; state.temps = o.temps || []; if (o.settings) state.settings = Object.assign({}, DEFAULT_SETTINGS, o.settings);
+      state.temps = o.temps || []; state.fleet = { vehicles: o.vehicles, drivers: o.drivers, duties: Array.isArray(o.duties) ? o.duties : null }; if (!state.fleet.duties) state.fleet.duties = initialDuties(); if (o.settings) state.settings = Object.assign({}, DEFAULT_SETTINGS, o.settings);
       if (o.plateCsv) LS.set('plateCsv', o.plateCsv); if (o.modelCsv) LS.set('modelCsv', o.modelCsv); loadRefData();
       LS.set('fleet', state.fleet); LS.set('temps', state.temps); LS.set('settings', state.settings); bump(); toast('バックアップを読み込みました'); admSettings();
     } catch { toast('読み込めませんでした。このアプリで書き出したJSONを選んでください'); }
@@ -1915,7 +2055,7 @@ function admSettings() {
   };
   const rg = $('#rsGuide'); if (rg) rg.onclick = () => { LS.del('guideOverride'); location.reload(); };
   $('#rsAll').onclick = async () => {
-    if (!(await confirmBox('このブラウザに保存した車両・乗務員・臨時便・設定・読み込んだCSV・変更したパスワードをすべて消して、初期状態に戻します。', '初期状態に戻す'))) return;
+    if (!(await confirmBox('このブラウザに保存した車両・乗務員・運用・臨時便・設定・読み込んだCSV・変更したパスワードをすべて消して、初期状態に戻します。', '初期状態に戻す'))) return;
     ['fleet', 'temps', 'settings', 'pwHash', 'plateCsv', 'modelCsv'].forEach(LS.del); location.reload();
   };
 }
