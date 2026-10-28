@@ -3,6 +3,7 @@
  * 事業者向け: 車両 / 乗務員（担当車）/ 運用表 / 臨時便 / 設定
  */
 'use strict';
+const APP_VERSION = '2026-10-29';
 
 /* ================= utilities ================= */
 const $ = (s, r = document) => r.querySelector(s);
@@ -1938,6 +1939,7 @@ function boot() {
   loadRefData();
   if (D.project) { CFG.companyName = D.project; $('#brandName').textContent = D.project; document.title = `${D.project} バス案内`; $('.disc').textContent = D.project.slice(0, 1); }
   loadFleet();
+  const ve = $('#appVer'); if (ve) ve.textContent = `　アプリの版：${APP_VERSION}`;
   window.addEventListener('hashchange', route);
   route();
 }

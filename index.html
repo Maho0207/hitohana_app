@@ -2,6 +2,7 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Cache-Control" content="no-cache">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>一花交通 バス案内</title>
 <meta name="description" content="架空のバス会社「一花交通」の時刻表・乗換案内・バス走行位置">
@@ -147,6 +148,10 @@ input:focus,select:focus,textarea:focus{border-color:var(--brand);outline:none;b
 .livebox{border-left:5px solid var(--sign);background:var(--surface-2);border-radius:var(--radius);padding:10px 14px;margin-bottom:12px}
 .plate{display:inline-flex;flex-direction:column;align-items:center;border:2px solid var(--ink);border-radius:6px;padding:2px 12px;background:var(--surface);line-height:1.2}
 .plate small{font-size:10.5px;color:var(--muted)}
+.plate,.plate *{white-space:nowrap}
+.plate{flex-shrink:0}
+.vno{white-space:nowrap}
+.busrow>:last-child{white-space:nowrap;text-align:right}
 .plate b{font-size:22px;letter-spacing:.05em}
 
 /* journeys */
@@ -253,13 +258,28 @@ footer{max-width:1180px;margin:0 auto;padding:0 16px 30px;font-size:12px;color:v
   </div>
 </header>
 <main id="app"></main>
-<footer>このサイトは架空のバス会社「一花交通」のデモです。実在の事業者・路線・人物とは関係ありません。</footer>
+<footer>このサイトは架空のバス会社「一花交通」のデモです。実在の事業者・路線・人物とは関係ありません。<span id="appVer"></span></footer>
 
-<script src="config.js"></script>
-<script src="data.js"></script>
-<script src="names.js"></script>
-<script src="templates.js"></script>
-<script src="fleet.js"></script>
-<script src="app.js"></script>
+<script>
+/* 読み込み：ページを更新したとき、古いJSがブラウザのキャッシュから使われないように、
+   各ファイルを毎回サーバーに確認してから読み込みます（変わっていなければ通信はごくわずかです）。
+   ローカルで index.html を直接開いたとき（file://）は通常の読み込みにします。 */
+(function () {
+  var files = ['config.js', 'data.js', 'names.js', 'templates.js', 'fleet.js', 'app.js'];
+  function plain(i) {
+    if (i >= files.length) return;
+    var s = document.createElement('script'); s.src = files[i];
+    s.onload = function () { plain(i + 1); };
+    s.onerror = function () { document.getElementById('app').innerHTML = '<div class="panel empty">' + files[i] + ' を読み込めませんでした。</div>'; };
+    document.body.appendChild(s);
+  }
+  if (location.protocol === 'file:' || !window.fetch) { plain(0); return; }
+  Promise.all(files.map(function (f) {
+    return fetch(f, { cache: 'no-cache' }).then(function (r) { if (!r.ok) throw new Error(f + ' ' + r.status); return r.text(); });
+  })).then(function (texts) {
+    texts.forEach(function (text, i) { var s = document.createElement('script'); s.text = text + '\n//# sourceURL=' + files[i]; document.body.appendChild(s); });
+  }).catch(function (e) { console.warn('通常の方法で読み込みます', e); plain(0); });
+})();
+</script>
 </body>
 </html>
