@@ -317,21 +317,32 @@ function simDay(date) {
       prevEnd = sim.endT;
     }
   };
+  // 1) 各営業所の運用に車両と担当乗務員を割り当てる（1人の乗務員は1日1運用まで：営業所をまたいでも重複させない）
+  const usedD = new Set(), perDep = [];
   for (const dep of G.depots) {
     const all = vehiclesOfDepot(dep.id);
     const withD = all.filter((v) => driversOfVehicle(v.id).length), noD = all.filter((v) => !driversOfVehicle(v.id).length);
     const order = rot(withD, di).concat(rot(noD, di));
     const bl = blocks.filter((b) => b.depot === dep.id);
-    const usedV = new Set(order.slice(0, bl.length).map((v) => v.id)), usedD = new Set();
+    const usedV = new Set(order.slice(0, bl.length).map((v) => v.id));
     const rows = bl.map((b, k) => {
       const vehicle = order[k] || null; let driver = null;
-      if (vehicle) { const ds = driversOfVehicle(vehicle.id); if (ds.length) { driver = ds[di % ds.length]; usedD.add(driver.id); } }
+      if (vehicle) {
+        const ds = driversOfVehicle(vehicle.id);
+        for (let t = 0; t < ds.length && !driver; t++) { const c = ds[(di + t) % ds.length]; if (!usedD.has(c.id)) driver = c; }
+        if (driver) usedD.add(driver.id);
+      }
       return { block: b, vehicle, driver };
     });
-    // 担当が非番・担当車なしの乗務員は予備乗務員
+    perDep.push({ dep, rows, noD, usedV });
+  }
+  // 2) 担当者のいない運用には、その日に乗務のない同じ営業所の乗務員（予備の乗務員）を充てる
+  for (const { dep, rows, noD, usedV } of perDep) {
     const spareD = rot(state.fleet.drivers.filter((d) => d.depot === dep.id && d.status !== '休職' && !usedD.has(d.id)).sort((a, b) => String(a.empNo).localeCompare(String(b.empNo), 'ja', { numeric: true })), di);
-    for (const r of rows) if (r.vehicle && !r.driver && spareD.length) { r.driver = spareD.shift(); r.spareDriver = true; }
+    for (const r of rows) if (r.vehicle && !r.driver && spareD.length) { r.driver = spareD.shift(); r.spareDriver = true; usedD.add(r.driver.id); }
     pools[dep.id] = { vehicles: noD.filter((v) => !usedV.has(v.id)), drivers: spareD };
+  }
+  for (const { rows } of perDep) {
     for (const r of rows) {
       const info = { block: r.block, vehicle: r.vehicle, driver: r.driver, spareDriver: !!r.spareDriver, sims: [], subs: [] };
       byBlock.push(info);
@@ -356,7 +367,9 @@ function simDay(date) {
     let k = j; while (k < trips.length && ready + deadheadMin(info.block.depot, trips[k].sys.stops[trips[k].s].stopId) > trips[k].dep) k++;
     for (; j < k; j++) addCancel(info, trips[j], '事故の影響（代走車の回送が間に合わない）', p.t);
     if (j >= trips.length) continue;
-    const v = pool.vehicles.shift(), d = pool.drivers.shift();
+    const v = pool.vehicles.shift(); let d = null; while (pool.drivers.length && !d) { const c = pool.drivers.shift(); if (!usedD.has(c.id)) d = c; }
+    if (!d) { pool.vehicles.unshift(v); for (; j < trips.length; j++) addCancel(info, trips[j], '乗務員不足（代走できる乗務員がいない）', p.t); continue; }
+    usedD.add(d.id);
     info.subs.push({ vehicle: v, driver: d, from: j, t: p.t });
     runBlock(info, j, v, d, true);
   }
@@ -636,8 +649,8 @@ function genVehicles(n, opt, rng = Math.random) {
     const cands = REF.models.filter((m) => templateYears(m).some((y) => y >= opt.yearFrom && y <= opt.yearTo));
     if (!cands.length) { errors.push(`${opt.yearFrom}〜${opt.yearTo}年に製造された車種テンプレートがありません`); break; }
     const free = []; for (let i = 1; i <= 999; i++) { const no = kanji + String(i).padStart(3, '0'); if (!usedNo.has(no)) free.push(no); }
-    if (!free.length) { errors.push(`車番「${kanji}001〜${kanji}999」がすべて使われています`); break; }
-    const no = pick(rng, free);
+    if (!free.length) { errors.push(`車番「${kanji}001〜${kanji}999」がすべて使われています`); continue; }
+    const no = opt.seq ? free[0] : pick(rng, free);
     let made = null, lastErr = '';
     for (let t = 0; t < 8 && !made; t++) {
       const m = pick(rng, cands);
@@ -650,6 +663,17 @@ function genVehicles(n, opt, rng = Math.random) {
   }
   out.errors = [...new Set(errors)];
   return out;
+}
+/* 追加した車両に、担当車を持っていない乗務員を1台につき1人ずつ割り当てる（同じ営業所の在籍者） */
+function assignFreeDriversTo(vehicles) {
+  const ids = new Set(state.fleet.vehicles.map((v) => v.id)); let n = 0;
+  const free = state.fleet.drivers.filter((d) => d.status !== '休職' && !(d.vehicleId && ids.has(d.vehicleId)))
+    .sort((a, b) => String(a.empNo).localeCompare(String(b.empNo), 'ja', { numeric: true }));
+  for (const v of vehicles) {
+    const i = free.findIndex((d) => d.depot === v.depot); if (i < 0) continue;
+    free[i].vehicleId = v.id; free.splice(i, 1); n++;
+  }
+  return n;
 }
 const AGE_W = [[19, 29, 0.12], [30, 39, 0.17], [40, 49, 0.24], [50, 59, 0.26], [60, 69, 0.15], [70, 79, 0.05], [80, 90, 0.01]];
 function genDrivers(n, opt, rng = Math.random, refDate = dateStr(new Date())) {
@@ -1440,13 +1464,20 @@ function randomVehicles() {
     <label class="field"><span>所属</span><select name="depot">${depotOptions('', '<option value="auto" selected>各営業所に均等</option>')}</select></label>
     <label class="field"><span>年式（から）</span><input type="number" name="y0" value="${y - 15}" min="1950" max="2100"></label>
     <label class="field"><span>年式（まで）</span><input type="number" name="y1" value="${y}" min="1950" max="2100"></label></div>
+    <fieldset style="border:1px solid var(--line);border-radius:8px;padding:10px 12px"><legend class="small" style="font-weight:700">車番の付け方</legend>
+      <label style="display:flex;gap:8px;align-items:center"><input type="radio" name="seq" value="0" checked> 空いている番号からランダムに付ける</label>
+      <label style="display:flex;gap:8px;align-items:center"><input type="radio" name="seq" value="1"> 空いている番号を小さい順に埋める</label>
+    </fieldset>
+    <label style="display:flex;gap:8px;align-items:flex-start"><input type="checkbox" name="assign" style="margin-top:5px"> <span>追加した車両に、担当車を持っていない乗務員を1台につき1人ずつ割り当てる<br><span class="small muted">同じ営業所の在籍者から社員番号順に割り当てます。足りないときは、残りの車両は担当なしの予備車になります。</span></span></label>
     <p class="note">車種は車種テンプレートから、年式の範囲内で製造されていたものを選びます。車番は「営業所の漢字＋数字3桁」（漢字は設定で変更できます）、登録番号はナンバー表の範囲から重ならないように付けます。</p></form>`,
   { foot: '<button class="btn" data-close>キャンセル</button><button class="btn primary" id="rvGo">追加する</button>' });
   $('#rvGo', d).onclick = () => {
     const f = $('#rv', d); const n = clamp(+f.n.value || 0, 1, 500); let y0 = +f.y0.value, y1 = +f.y1.value; if (y0 > y1) [y0, y1] = [y1, y0];
-    const made = genVehicles(n, { depot: f.depot.value, yearFrom: y0, yearTo: y1 });
-    if (made.length) { state.fleet.vehicles.push(...made); saveFleet(); }
-    d.close(); toast(made.length ? `${made.length}台を追加しました` : '追加できませんでした'); admVehicles();
+    const made = genVehicles(n, { depot: f.depot.value, yearFrom: y0, yearTo: y1, seq: f.seq.value === '1' });
+    let k = 0;
+    if (made.length) { state.fleet.vehicles.push(...made); if (f.assign.checked) k = assignFreeDriversTo(made); saveFleet(); }
+    d.close();
+    toast(made.length ? `${made.length}台を追加しました${f.seq.value === '1' ? `（${made[0].no}〜${made[made.length - 1].no}）` : ''}${f.assign.checked ? `。${k}台に担当を割り当てました` : ''}` : '追加できませんでした'); admVehicles();
     if (made.errors.length) modal('追加できなかった車両があります', `<p>${made.length}台を追加しました（指定 ${n}台）。</p><p class="small" style="color:var(--danger)">${made.errors.map(esc).join('<br>')}</p>`);
   };
 }
