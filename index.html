@@ -123,6 +123,7 @@ input:focus,select:focus,textarea:focus{border-color:var(--brand);outline:none;b
 .min .bar{height:3px;width:22px;border-radius:2px;margin-top:3px}
 .min.past b{color:var(--muted);font-weight:400}
 .min.next{box-shadow:inset 0 0 0 2px var(--sign)}
+.min.cancel b{text-decoration:line-through;color:var(--muted);font-weight:400}
 .tt-legend{display:flex;flex-wrap:wrap;gap:6px 14px;padding:10px 18px;border-top:1px solid var(--line);font-size:12.5px;color:var(--muted)}
 
 /* trip detail */
@@ -184,6 +185,11 @@ input:focus,select:focus,textarea:focus{border-color:var(--brand);outline:none;b
 .mapwrap:not(.z1) .stoplabel{display:none}
 .bus{cursor:pointer}
 .bus text{font-size:3px;font-weight:700;fill:#fff;pointer-events:none}
+.stoprows{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:6px;margin-top:6px}
+.stoprow{display:flex;flex-direction:column;gap:4px;padding:9px 12px;border:1.5px solid var(--line);border-radius:var(--radius);text-decoration:none;color:inherit;background:var(--surface)}
+.stoprow:hover{border-color:var(--brand)}
+.rtags{display:flex;flex-wrap:wrap;gap:4px}
+.rtag{font-size:11.5px;border-left:4px solid var(--rc);padding:0 6px;background:var(--surface-2);border-radius:3px;color:var(--muted)}
 .legend-dot{display:inline-block;width:10px;height:10px;border-radius:50%;vertical-align:middle;margin-right:4px}
 
 /* tables (admin) */
@@ -239,6 +245,7 @@ footer{max-width:1180px;margin:0 auto;padding:0 16px 30px;font-size:12px;color:v
     <a class="mark" href="#/timetable"><span class="disc">一</span><span><b id="brandName">一花交通</b><small>バス案内</small></span></a>
     <nav class="tabs" id="nav">
       <a href="#/timetable" data-r="timetable">時刻表</a>
+      <a href="#/stop" data-r="stop">停留所</a>
       <a href="#/search" data-r="search">乗換案内</a>
       <a href="#/live" data-r="live">走行位置</a>
       <a href="#/admin" data-r="admin" class="staff">事業者用</a>
@@ -251,6 +258,7 @@ footer{max-width:1180px;margin:0 auto;padding:0 16px 30px;font-size:12px;color:v
 <script src="config.js"></script>
 <script src="data.js"></script>
 <script src="names.js"></script>
+<script src="templates.js"></script>
 <script src="fleet.js"></script>
 <script src="app.js"></script>
 </body>
