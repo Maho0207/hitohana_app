@@ -6,6 +6,6 @@
  */
 window.APP_CONFIG = {
   companyName: '一花交通',
-  adminPasswordHash: '52e4af2715fa416fa570ed7ab1e4be53db3d7360811cd0f34c3ee76c11d51db3',
+  adminPasswordHash: 'd07dd6d136edbb89b72f22df1ccf50a75c9cf44c54eb322493e3de7240c8acee',
   storagePrefix: 'ichika.',
 };
