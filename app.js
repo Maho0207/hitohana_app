@@ -3,7 +3,7 @@
  * 事業者向け: 車両 / 乗務員（担当車）/ 運用表 / 臨時便 / 設定
  */
 'use strict';
-const APP_VERSION = '2026-10-29.3';
+const APP_VERSION = '2026-10-31';
 
 /* ================= utilities ================= */
 const $ = (s, r = document) => r.querySelector(s);
@@ -108,8 +108,13 @@ function buildIndex(D) {
     G.sys[s.id] = sys;
     s.stops.forEach((st, i) => { if (i < s.stops.length - 1) (G.stopSys[st.stopId] ||= []).push({ sys, idx: i }); });
   }
-  const useDay = D.trips.some((t) => t.day === 'wd') ? 'wd' : (D.trips[0]?.day || 'wd'); G.useDay = useDay;
-  G.baseTrips = D.trips.filter((t) => t.day === useDay && G.sys[t.systemId]).map((t) => normTrip({ id: t.id, sys: G.sys[t.systemId], times: t.times, temp: false }));
+  G.dayCodes = [...new Set(D.trips.map((t) => t.day || 'wd'))]; G.tripsByKey = {};
+  G.baseTrips = D.trips.filter((t) => G.sys[t.systemId]).map((t) => normTrip({ id: t.id, sys: G.sys[t.systemId], times: t.times, temp: false, code: t.day || 'wd', notOp: t.notOperating || null }));
+  // 路線の並び：その路線の系統番号のうち最も若いものの順
+  const minNo = {}; for (const sy of Object.values(G.sys)) if (!minNo[sy.routeId] || sy.no.localeCompare(minNo[sy.routeId], 'ja', { numeric: true }) < 0) minNo[sy.routeId] = sy.no;
+  G.routesSorted = D.routes.slice().sort((a, b) => String(minNo[a.id] ?? '￿').localeCompare(String(minNo[b.id] ?? '￿'), 'ja', { numeric: true }));
+  G.routeOrder = new Map(G.routesSorted.map((r, i) => [r.id, i]));
+  G.routeMinNo = minNo;
   G.stopsActive = D.stops.filter((s) => G.stopSys[s.id]);
   G.rank = Object.fromEntries(D.stops.map((s) => [s.id, (s.routes || []).length]));
   G.bounds = (() => {
@@ -133,6 +138,7 @@ function tripDestName(trip) {
   if (trip.e === trip.sys.n - 1) return sysLabel(trip.sys);
   return `${stopName(trip.sys.stops[trip.e].stopId)}行`;
 }
+const sortRouteIds = (ids) => (ids || []).slice().sort((a, b) => (G.routeOrder.get(a) ?? 999) - (G.routeOrder.get(b) ?? 999));
 function routeBadge(sys) { return `<span class="badge" style="background:${esc(sys.color)}">${esc(sys.no)}</span>`; }
 
 /* fares */
@@ -146,22 +152,31 @@ const yen = (v) => v == null ? '—' : `${v.toLocaleString('ja-JP')}円`;
 
 /* ================= app state (company side) ================= */
 const DEFAULT_SETTINGS = {
+  // p: 区間ごとの混雑発生率(%)、max: 1回の混雑の遅れ(分)、zlo〜zhi: 基準停（時間調整停留所）付近で1便あたりに生じる遅れ(分)
   bands: [
-    { name: '早朝', from: 0, to: 420, p: 1.0, max: 1 },
-    { name: '朝ラッシュ', from: 420, to: 570, p: 6.0, max: 2 },
-    { name: '日中', from: 570, to: 960, p: 2.5, max: 1 },
-    { name: '夕ラッシュ', from: 960, to: 1140, p: 5.5, max: 2 },
-    { name: '夜間', from: 1140, to: 2000, p: 1.5, max: 1 },
+    { name: '早朝', from: 0, to: 420, p: 0.5, max: 1, zlo: 0, zhi: 0.5 },
+    { name: '朝ラッシュ', from: 420, to: 570, p: 6.0, max: 2, zlo: 10, zhi: 20 },
+    { name: '日中', from: 570, to: 960, p: 2.5, max: 1, zlo: 3.5, zhi: 5.5 },
+    { name: '夕ラッシュ', from: 960, to: 1140, p: 5.5, max: 2, zlo: 10, zhi: 20 },
+    { name: '夜', from: 1140, to: 1320, p: 1.5, max: 1, zlo: 1, zhi: 3 },
+    { name: '深夜', from: 1320, to: 2000, p: 0.5, max: 1, zlo: 0, zhi: 0.5 },
   ],
-  recover: 12,   // 遅れているときに区間を1分詰められる確率(%)
+  recover: 4,    // 遅れているときに区間を1分詰められる確率(%)
   trouble: 0.2,  // 停留所ごとの客とのトラブル発生率(%) 接客態度3のとき
   accident: 0.006, // 区間ごとの事故発生率(%) 運転技術3のとき
   turnaround: 1, // 折返し最小時間(分)
   prep: 10,      // 事故のあと代走車が車庫を出られるまでの時間(分)
+  follow: 0.5,   // 続行運転で前のバスとあける間隔(分)
 };
+function loadSettings() {
+  const saved = LS.get('settings', {}) || {};
+  const st = Object.assign({}, DEFAULT_SETTINGS, saved);
+  if (!Array.isArray(saved.bands) || !saved.bands.every((b) => 'zlo' in b)) { st.bands = JSON.parse(JSON.stringify(DEFAULT_SETTINGS.bands)); if (saved.recover === 12) st.recover = DEFAULT_SETTINGS.recover; }
+  return st;
+}
 const state = {
   ver: 1,
-  settings: Object.assign({}, DEFAULT_SETTINGS, LS.get('settings', {})),
+  settings: loadSettings(),
   temps: LS.get('temps', []),
   fleet: null,
 };
@@ -183,9 +198,68 @@ function makeTempTrip(t) {
   });
   return normTrip({ id: 'tmp_' + t.id, sys, times, temp: true, note: t.note || '', tempId: t.id });
 }
+/* ================= ダイヤの種類（平日／土休日）と祝日 ================= */
+const HOLI_CACHE = {};
+function jpHolidays(y) {
+  if (HOLI_CACHE[y]) return HOLI_CACHE[y];
+  const h = new Map(); const add = (m, d, n) => h.set(`${pad2(m)}-${pad2(d)}`, n);
+  const nthMon = (m, n) => { const w = new Date(y, m - 1, 1).getDay(); return 1 + ((8 - w) % 7) + (n - 1) * 7; };
+  add(1, 1, '元日'); add(1, nthMon(1, 2), '成人の日'); add(2, 11, '建国記念の日'); if (y >= 2020) add(2, 23, '天皇誕生日');
+  add(3, Math.floor(20.8431 + 0.242194 * (y - 1980) - Math.floor((y - 1980) / 4)), '春分の日');
+  add(4, 29, '昭和の日'); add(5, 3, '憲法記念日'); add(5, 4, 'みどりの日'); add(5, 5, 'こどもの日');
+  add(7, nthMon(7, 3), '海の日'); add(8, 11, '山の日'); add(9, nthMon(9, 3), '敬老の日');
+  add(9, Math.floor(23.2488 + 0.242194 * (y - 1980) - Math.floor((y - 1980) / 4)), '秋分の日');
+  add(10, nthMon(10, 2), 'スポーツの日'); add(11, 3, '文化の日'); add(11, 23, '勤労感謝の日');
+  const key = (dt) => `${pad2(dt.getMonth() + 1)}-${pad2(dt.getDate())}`;
+  // 国民の休日（祝日に挟まれた平日）
+  for (let m = 1; m <= 12; m++) for (let d = 1; d <= 31; d++) {
+    const dt = new Date(y, m - 1, d); if (dt.getMonth() !== m - 1) continue;
+    const prev = new Date(y, m - 1, d - 1), next = new Date(y, m - 1, d + 1);
+    if (!h.has(key(dt)) && dt.getDay() !== 0 && h.has(key(prev)) && h.has(key(next)) && prev.getFullYear() === y && next.getFullYear() === y) h.set(key(dt), '国民の休日');
+  }
+  // 振替休日
+  for (const [k] of [...h]) {
+    const [m, d] = k.split('-').map(Number); const dt = new Date(y, m - 1, d);
+    if (dt.getDay() === 0) { let n = new Date(y, m - 1, d + 1); while (h.has(key(n))) n = new Date(n.getFullYear(), n.getMonth(), n.getDate() + 1); if (n.getFullYear() === y) h.set(key(n), '振替休日'); }
+  }
+  HOLI_CACHE[y] = h; return h;
+}
+function holidayName(ds) {
+  const [y, m, d] = ds.split('-').map(Number); const k = `${pad2(m)}-${pad2(d)}`;
+  if ((m === 12 && d >= 30) || (m === 1 && d <= 3)) return jpHolidays(y).get(k) || '年末年始';
+  return jpHolidays(y).get(k) || null;
+}
+/* その日のダイヤ：土曜・日曜・祝日・年末年始（12/30〜1/3）は土休日ダイヤ */
+function dayInfo(ds) {
+  const [y, m, d] = ds.split('-').map(Number); const w = new Date(y, m - 1, d).getDay();
+  const hol = holidayName(ds); const wk = w === 0 || w === 6 || hol ? 'weekend' : 'weekday';
+  const codes = G.dayCodes, has = (c) => codes.includes(c);
+  let code;
+  if (codes.length <= 1) code = codes[0] || 'wd';
+  else if (wk === 'weekday') code = has('wd') ? 'wd' : codes[0];
+  else if (w === 6 && !hol) code = has('sa') ? 'sa' : has('ho') ? 'ho' : codes[0];
+  else code = has('ho') ? 'ho' : has('sa') ? 'sa' : codes[0];
+  const label = wk === 'weekday' ? '平日ダイヤ' : codes.length > 1 && code === 'sa' ? '土曜ダイヤ' : codes.length > 1 && code === 'ho' ? '休日ダイヤ' : '土休日ダイヤ';
+  return { code, wk, key: code + '|' + wk, label, holiday: hol };
+}
+function baseTripsFor(info) { return (G.tripsByKey[info.key] ||= G.baseTrips.filter((t) => t.code === info.code && t.notOp !== info.wk)); }
+/* ダイヤの種類の一覧（近い14日から集める） */
+function dayKinds() {
+  const seen = new Map(); let ds = dateStr(new Date());
+  for (let i = 0; i < 14; i++) { const inf = dayInfo(ds); if (!seen.has(inf.key)) seen.set(inf.key, inf); ds = addDays(ds, 1); }
+  return [...seen.values()].sort((a, b) => (a.wk === 'weekday' ? 0 : 1) - (b.wk === 'weekday' ? 0 : 1));
+}
+const dayShort = (inf) => inf.wk === 'weekday' ? '平日' : inf.label.replace('ダイヤ', '');
+function dutyApplies(d, info) {
+  if (d.code && d.code !== info.code) return false;
+  if (d.notOp && d.notOp === info.wk) return false;
+  if (Array.isArray(d.keys) && d.keys.length && !d.keys.includes(info.key)) return false;
+  return true;
+}
+
 function tripsFor(date) {
   if (caches.trips.has(date)) return caches.trips.get(date);
-  const list = G.baseTrips.concat(state.temps.filter((t) => t.date === date).map(makeTempTrip).filter(Boolean));
+  const list = baseTripsFor(dayInfo(date)).concat(state.temps.filter((t) => t.date === date).map(makeTempTrip).filter(Boolean));
   list.sort((a, b) => a.dep - b.dep);
   const byId = new Map(list.map((t) => [t.id, t]));
   const r = { list, byId }; caches.trips.set(date, r); return r;
@@ -213,72 +287,91 @@ function autoBlocks(list) {
   }
   return blocks;
 }
-/* 運用で車両を使う時間帯（出庫〜入庫）。案内データの運用は出入庫回送を含めた時刻、それ以外は回送時間から推定 */
-function blockSpan(b) {
-  const f = b.trips[0], l = b.trips[b.trips.length - 1];
-  let s = f.dep - deadheadMin(b.depot, f.sys.stops[f.s].stopId), e = l.end + deadheadMin(b.depot, l.sys.stops[l.e].stopId);
-  if (b.duty?.vs != null) s = Math.min(b.duty.vs, f.dep);
-  if (b.duty?.ve != null) e = Math.max(b.duty.ve, l.end);
-  return [s, e];
-}
+/* 運用で車両を使う時間帯（出庫〜入庫）。案内データの運用は中間解放で車両を返す区切りも使う */
 const VEH_GAP = 5; // 入庫してから次の運用に出るまでに最低限あける時間（分）
+function blockSegs(b) {
+  const f = b.trips[0], l = b.trips[b.trips.length - 1];
+  const dIn = deadheadMin(b.depot, l.sys.stops[l.e].stopId), dOut = deadheadMin(b.depot, f.sys.stops[f.s].stopId);
+  if (b.carryFrom) return [[0, l.end + dIn]];
+  let segs;
+  if (b.duty?.segs && b.duty.segTrips === b.trips.map((t) => t.id).sort().join()) segs = b.duty.segs.map((x) => x.slice());
+  else segs = [[Math.min(f.dep - dOut, b.duty?.vs ?? Infinity), Math.max(l.end + dIn, b.duty?.ve ?? -Infinity)]];
+  if (b.duty?.overnight) segs[segs.length - 1][1] = Math.max(segs[segs.length - 1][1], 1740);
+  return segs;
+}
 /* その日の運用：設定された運用（state.fleet.duties）の便だけを運行する。どの運用にも入っていない便は運休 */
 function blocksFor(date) {
   if (caches.blocks.has(date)) return caches.blocks.get(date);
-  const { list, byId } = tripsFor(date);
+  const { list, byId } = tripsFor(date); const info = dayInfo(date);
   const duties = state.fleet?.duties;
   let blocks;
   if (Array.isArray(duties)) {
-    const seen = new Set();
-    blocks = duties.map((d) => ({
-      id: d.id, duty: d, depot: d.depot, no: d.no,
-      trips: d.trips.map((id) => byId.get(id)).filter((t) => t && !seen.has(t.id) && seen.add(t.id)).sort((a, b) => a.dep - b.dep),
-    })).filter((b) => b.trips.length);
+    const seen = new Set(); const take = (ids) => ids.map((id) => byId.get(id)).filter((t) => t && !seen.has(t.id) && seen.add(t.id)).sort((a, b) => a.dep - b.dep);
+    // 前日の滞泊運用の続き（翌朝の便）
+    const prev = addDays(date, -1), pinfo = dayInfo(prev);
+    const carry = duties.filter((d) => d.overnight && Array.isArray(d.nextTrips) && d.nextTrips.length && dutyApplies(d, pinfo))
+      .map((d) => ({ id: d.id + '@next', duty: d, depot: d.depot, no: `${d.no}（滞泊明け）`, carryFrom: { date: prev, id: d.id }, trips: take(d.nextTrips) }));
+    blocks = carry.concat(duties.filter((d) => dutyApplies(d, info)).map((d) => ({ id: d.id, duty: d, depot: d.depot, no: d.no, trips: take(d.trips) }))).filter((b) => b.trips.length);
   } else {
     blocks = autoBlocks(list); const c = {};
     for (const b of blocks) { c[b.depot] = (c[b.depot] || 0) + 1; b.no = String(c[b.depot]); b.id = b.depot + '-' + b.no; }
   }
-  for (const b of blocks) b.span = blockSpan(b);
+  for (const b of blocks) { b.segs = blockSegs(b); b.span = [b.segs[0][0], b.segs[b.segs.length - 1][1]]; }
   const assigned = new Set(blocks.flatMap((b) => b.trips.map((t) => t.id)));
   const unassigned = list.filter((t) => !assigned.has(t.id));
   const counter = {}, needVeh = {};
   for (const b of blocks) counter[b.depot] = (counter[b.depot] || 0) + 1;
   for (const dep of G.depots) {
-    const pts = []; for (const b of blocks) if (b.depot === dep.id) pts.push([b.span[0], 1], [b.span[1] + VEH_GAP, -1]);
+    const pts = []; for (const b of blocks) if (b.depot === dep.id) for (const [s, e] of b.segs) pts.push([s, 1], [e + VEH_GAP, -1]);
     pts.sort((a, b) => a[0] - b[0] || a[1] - b[1]); let c = 0, m = 0; for (const [, v] of pts) { c += v; m = Math.max(m, c); }
     needVeh[dep.id] = m;
   }
-  const r = { blocks, perDepot: counter, needVeh, unassigned }; caches.blocks.set(date, r); return r;
+  const r = { blocks, perDepot: counter, needVeh, unassigned, info }; caches.blocks.set(date, r); return r;
 }
-/* 案内データ（運用計画アプリ）の運用を読み込む */
+/* 案内データ（運用計画アプリ）の運用を読み込む：ダイヤ・運休日・中間解放・滞泊にも対応 */
 function dutiesFromGuide() {
   const ops = G.D.operations?.duties; if (!Array.isArray(ops) || !ops.length) return null;
   const ids = new Set(G.baseTrips.map((t) => t.id)); const out = [];
   ops.forEach((d, i) => {
-    if (d.day && d.day !== G.useDay) return;
     const found = [];
     const walk = (x) => { if (typeof x === 'string') { if (ids.has(x) && !found.includes(x)) found.push(x); } else if (Array.isArray(x)) x.forEach(walk); else if (x && typeof x === 'object') Object.values(x).forEach(walk); };
     walk(d.trips || d); if (!found.length) return;
     let depot = G.depots.find((p) => p.id === (d.depotId || d.depot))?.id;
     if (!depot) { const t = G.baseTrips.find((x) => x.id === found[0]); depot = (G.depots.find((p) => (p.routes || []).includes(t.sys.routeId)) || G.depots[0]).id; }
-    const ev = Array.isArray(d.events) ? d.events : [];
-    const tr = ev.filter((e) => e.type === 'trip'), dh = ev.filter((e) => e.type === 'dh');
-    const vs = dh.length && tr.length && dh[0].start <= tr[0].start ? dh[0].start : null;
-    const ve = dh.length && tr.length && dh[dh.length - 1].end >= tr[tr.length - 1].end ? dh[dh.length - 1].end : null;
-    out.push({ id: 'g' + (d.id || i), depot, no: String(d.name || d.no || d.label || i + 1), trips: found, vs, ve });
+    // 車両を使う区間：便・回送・待機をつなげ、点呼や中間解放で区切る
+    const segs = []; let cur = null;
+    for (const e of (Array.isArray(d.events) ? d.events : [])) {
+      if (e.type === 'trip' || e.type === 'dh' || (e.type === 'wait' && cur)) { if (!cur) cur = [e.start, e.end]; else cur[1] = Math.max(cur[1], e.end); }
+      else if (cur) { segs.push(cur); cur = null; }
+    }
+    if (cur) segs.push(cur);
+    const next = Array.isArray(d.nextDayTrips) ? d.nextDayTrips.filter((x) => ids.has(typeof x === 'string' ? x : x?.id || x?.tripId)).map((x) => typeof x === 'string' ? x : x.id || x.tripId) : [];
+    out.push({
+      id: 'g' + (d.id || i), depot, no: String(d.name || d.no || d.label || i + 1), trips: found,
+      code: d.day || null, notOp: d.notOperating || null,
+      segs: segs.length ? segs : null, segTrips: found.slice().sort().join(),
+      overnight: !!d.overnightStay, nextTrips: next,
+    });
   });
   return out.length ? out : null;
 }
-function guideDutySig() { const ops = G.D.operations?.duties; return Array.isArray(ops) && ops.length ? 'g:' + hashStr(JSON.stringify(ops.map((d) => [d.id, d.day, d.depotId, d.trips]))) : null; }
-function tripSig() { return 'a:' + hashStr(G.baseTrips.map((t) => t.id).sort().join()); }
-function makeDuties(blocks, prefix = '', startNo = {}) {
+function guideDutySig() { const ops = G.D.operations?.duties; return Array.isArray(ops) && ops.length ? 'g2:' + hashStr(JSON.stringify(ops.map((d) => [d.id, d.day, d.depotId, d.trips, d.notOperating, d.overnightStay, d.nextDayTrips, (d.events || []).length]))) : null; }
+function tripSig() { return 'a2:' + hashStr(G.baseTrips.map((t) => t.id + (t.code || '') + (t.notOp || '')).sort().join()); }
+function makeDuties(blocks, prefix = '', startNo = {}, extra = {}) {
   const c = { ...startNo };
-  return blocks.map((b) => { c[b.depot] = (c[b.depot] || 0) + 1; return { id: uid('du'), depot: b.depot, no: prefix + c[b.depot], trips: b.trips.map((t) => t.id) }; });
+  return blocks.map((b) => { c[b.depot] = (c[b.depot] || 0) + 1; return { id: uid('du'), depot: b.depot, no: prefix + c[b.depot], trips: b.trips.map((t) => t.id), ...extra }; });
+}
+/* 時刻表から運用を自動作成（ダイヤの種類ごと。便が同じならまとめて1組） */
+function autoDuties() {
+  const kinds = dayKinds(); const sets = kinds.map((k) => baseTripsFor(k));
+  const same = sets.every((s) => s.length === sets[0].length && s.every((t, i) => t === sets[0][i]));
+  if (same) return makeDuties(autoBlocks(sets[0]));
+  return kinds.flatMap((k, i) => makeDuties(autoBlocks(sets[i]), dayShort(k), {}, { keys: [k.key] }));
 }
 /* 運用の初期設定：案内データに運用があればそれを、なければ時刻表から自動で作る（臨時便は日付ごとに臨時運用を作る） */
 function initialDuties() {
   const g = dutiesFromGuide();
-  const base = g || makeDuties(autoBlocks(G.baseTrips));
+  const base = g || autoDuties();
   if (state.fleet) state.fleet.dutySrc = g ? { type: 'guide', sig: guideDutySig() } : { type: 'auto', sig: tripSig() };
   const dates = [...new Set(state.temps.map((t) => t.date))];
   for (const ds of dates) base.push(...tempDuties(state.temps.filter((t) => t.date === ds), base));
@@ -294,18 +387,16 @@ function tempDuties(temps, existing = state.fleet.duties || []) {
 function syncDuties() {
   const f = state.fleet; const keepTemp = (f.duties || []).filter((d) => d.trips.length && d.trips.every((id) => id.startsWith('tmp_')));
   const gsig = guideDutySig(), src = f.dutySrc;
-  let msg = null;
   if (!Array.isArray(f.duties)) { f.duties = initialDuties(); return null; }
   if (gsig && (!src || src.sig !== gsig)) {
     f.duties = dutiesFromGuide().concat(keepTemp); f.dutySrc = { type: 'guide', sig: gsig };
-    msg = `案内データの運用（${f.duties.length - keepTemp.length}運用）を読み込みました。`;
-  } else if (!gsig && (!src || src.type === 'auto') && (!src || src.sig !== tripSig())) {
-    const covered = new Set(f.duties.flatMap((d) => d.trips));
-    if (!src && G.baseTrips.every((t) => covered.has(t.id))) { f.dutySrc = { type: 'auto', sig: tripSig() }; return null; }
-    f.duties = makeDuties(autoBlocks(G.baseTrips)).concat(keepTemp); f.dutySrc = { type: 'auto', sig: tripSig() };
-    msg = '時刻表が変わったため、運用を自動で作り直しました。';
+    return `案内データの運用（${f.duties.length - keepTemp.length}運用）を読み込みました。`;
   }
-  return msg;
+  if (!gsig && (!src || src.type === 'auto') && (!src || src.sig !== tripSig())) {
+    f.duties = autoDuties().concat(keepTemp); f.dutySrc = { type: 'auto', sig: tripSig() };
+    return '時刻表が変わったため、運用を自動で作り直しました。';
+  }
+  return null;
 }
 function markDutiesEdited() { if (state.fleet.dutySrc?.type === 'auto') state.fleet.dutySrc.type = 'custom'; }
 function depotName(id) { return G.depots.find((d) => d.id === id)?.name || '（未設定）'; }
@@ -323,40 +414,6 @@ function vehiclesOfDepot(depId) {
 }
 function driversOfVehicle(vid) {
   return state.fleet.drivers.filter((d) => d.vehicleId === vid && d.status !== '休職').sort((a, b) => String(a.empNo).localeCompare(String(b.empNo), 'ja', { numeric: true }));
-}
-function simulateTrip(trip, start, driver, rng) {
-  const S = state.settings, T = trip.times;
-  const skill = clamp(driver?.skill ?? 3, 1, 5) - 1, svc = clamp(driver?.service ?? 3, 1, 5) - 1;
-  const arr = new Array(T.length).fill(null), dep = new Array(T.length).fill(null), events = [];
-  let prev = trip.s; dep[prev] = Math.max(T[prev][1], start); arr[prev] = dep[prev];
-  if (dep[prev] - T[prev][1] >= 1) events.push({ type: 'late', at: prev, min: dep[prev] - T[prev][1], text: '前便の遅れを引き継いで発車' });
-  let accident = null;
-  for (let j = trip.s + 1; j <= trip.e; j++) {
-    if (!T[j]) continue;
-    const sRun = Math.max(0, T[j][0] - T[prev][1]);
-    const band = bandAt(T[prev][1]);
-    let extra = 0;
-    const r1 = rng(), r2 = rng(), r3 = rng(), r4 = rng(), r5 = rng();
-    if (r1 < (band.p / 100) * F_DELAY[skill]) {
-      extra = 1 + Math.floor(r2 * band.max);
-      events.push({ type: 'jam', at: j, min: extra, text: `${stopName(trip.sys.stops[prev].stopId)}→${stopName(trip.sys.stops[j].stopId)} 間で混雑` });
-    } else if (dep[prev] - T[prev][1] >= 1 && sRun >= 2 && r2 < (S.recover / 100) * F_RECOVER[skill]) extra = -1;
-    if (r3 < (S.accident / 100) * F_ACC[skill]) {
-      const f = 0.2 + r4 * 0.6;
-      accident = { from: prev, to: j, f, t: dep[prev] + Math.max(0.4, sRun + extra) * f };
-      events.push({ type: 'accident', at: j, text: `${stopName(trip.sys.stops[prev].stopId)}→${stopName(trip.sys.stops[j].stopId)} 間で事故、運転打ち切り` });
-      break;
-    }
-    arr[j] = dep[prev] + Math.max(0.4, sRun + extra);
-    let d = Math.max(T[j][1], arr[j]);
-    if (j < trip.e && r5 < (S.trouble / 100) * F_TROUBLE[svc]) {
-      const m = 2 + Math.floor(rng() * 4); d += m;
-      events.push({ type: 'trouble', at: j, min: m, text: `${stopName(trip.sys.stops[j].stopId)}で乗客対応（${m}分）` });
-    }
-    dep[j] = j === trip.e ? arr[j] : d;
-    prev = j;
-  }
-  return { arr, dep, events, accident, endT: accident ? accident.t : arr[trip.e] };
 }
 /* 回送時間（車庫→停留所）：路線網の最短所要時間をもとに推定 */
 function deadheadDist(depId) {
@@ -386,86 +443,183 @@ function deadheadMin(depId, stopId) {
   return (dep?.outMin || 0) + (d == null ? 60 : Math.ceil(d * 0.85));
 }
 const rot = (arr, k) => arr.length ? arr.map((_, i) => arr[(i + k) % arr.length]) : arr;
-function simDay(date) {
-  if (caches.sim.has(date)) return caches.sim.get(date);
-  const { blocks, unassigned } = blocksFor(date);
+/* 小さな優先度つきキュー（時刻の早い順） */
+class MinHeap {
+  constructor(cmp) { this.a = []; this.cmp = cmp; }
+  get size() { return this.a.length; }
+  push(x) { const a = this.a; a.push(x); let i = a.length - 1; while (i > 0) { const p = (i - 1) >> 1; if (this.cmp(a[i], a[p]) >= 0) break; [a[i], a[p]] = [a[p], a[i]]; i = p; } }
+  pop() {
+    const a = this.a; const top = a[0]; const last = a.pop();
+    if (a.length) { a[0] = last; let i = 0; for (;;) { const l = i * 2 + 1, r = l + 1; let m = i; if (l < a.length && this.cmp(a[l], a[m]) < 0) m = l; if (r < a.length && this.cmp(a[r], a[m]) < 0) m = r; if (m === i) break; [a[i], a[m]] = [a[m], a[i]]; i = m; } }
+    return top;
+  }
+}
+const F_ZONE = [1.3, 1.15, 1.0, 0.85, 0.7]; // 運転技術 → 基準停付近の遅れの倍率
+/* 基準停（時間調整停留所）付近の区間で、その便の遅れが時間帯の目安（zlo〜zhi分）まで広がるようにする。
+   すでに前の便から遅れを引き継いでいるときは、そのぶん上乗せしない */
+function zonePlan(trip, rng, skill) {
+  const T = trip.times; const served = []; for (let i = trip.s; i <= trip.e; i++) if (T[i]) served.push(i);
+  const zone = new Set();
+  served.forEach((i, p) => {
+    if (!G.stop[trip.sys.stops[i].stopId]?.timeAdjust) return;
+    for (let q = Math.max(1, p - 1); q <= Math.min(served.length - 1, p + 1); q++) zone.add(served[q]);
+  });
+  const plan = { cum: {}, total: 0, band: bandAt((trip.dep + trip.end) / 2) }; if (!zone.size) return plan;
+  const band = plan.band;
+  plan.total = ((band.zlo ?? 0) + rng() * Math.max(0, (band.zhi ?? 0) - (band.zlo ?? 0))) * F_ZONE[skill];
+  const js = [...zone].sort((a, b) => a - b); const w = js.map(() => 0.5 + rng()); const sw = w.reduce((a, b) => a + b, 0);
+  let c = 0; js.forEach((j, k) => { c += w[k] / sw; plan.cum[j] = c; });
+  return plan;
+}
+/* 1日の運行をまとめて再現する（全バスを時刻順に1区間ずつ進める）。
+   ・後ろのバスは前のバスを追い越さない（同じ区間では前のバスより先に着かず、停留所では前のバスの発車を待つ＝続行運転）
+   ・車両不足・乗務員不足の運用は運休、事故の次の便は運休、以降は代走 */
+function simDay(date, noCarry = false) {
+  const ck = date + (noCarry ? '|nc' : ''); if (caches.sim.has(ck)) return caches.sim.get(ck);
+  const bf = blocksFor(date); const { unassigned } = bf;
+  const blocks = noCarry ? bf.blocks.filter((b) => !b.carryFrom) : bf.blocks;
   const di = dayIndex(date); const S = state.settings;
-  const turn = S.turnaround ?? 1, prep = S.prep ?? 10;
+  const turn = S.turnaround ?? 1, prep = S.prep ?? 10, gapF = S.follow ?? 0.5;
   const byTrip = new Map(), byBlock = [], usedD = new Set();
-  // 車両の状態：使う時間帯の予約と、事故で使えなくなった時刻
   const V = new Map(), order = {}, spareOrder = {};
+  const vids = new Set(state.fleet.vehicles.map((v) => v.id));
   for (const dep of G.depots) {
     const all = vehiclesOfDepot(dep.id);
     for (const v of all) V.set(v.id, { v, busy: [], broken: null, hasD: driversOfVehicle(v.id).length > 0 });
     order[dep.id] = rot(all.filter((v) => V.get(v.id).hasD), di).concat(rot(all.filter((v) => !V.get(v.id).hasD), di)).map((v) => V.get(v.id));
     const ds = state.fleet.drivers.filter((d) => d.depot === dep.id && d.status !== '休職').sort((a, b) => String(a.empNo).localeCompare(String(b.empNo), 'ja', { numeric: true }));
-    const vids = new Set(state.fleet.vehicles.map((v) => v.id));
     spareOrder[dep.id] = rot(ds.filter((d) => !(d.vehicleId && vids.has(d.vehicleId))), di).concat(rot(ds.filter((d) => d.vehicleId && vids.has(d.vehicleId)), di));
   }
-  const isFree = (st, s, e) => (st.broken == null || e < st.broken) && st.busy.every(([a, b]) => e + VEH_GAP <= a || b + VEH_GAP <= s);
+  const isFree = (st, segs) => segs.every(([s, e]) => (st.broken == null || e < st.broken) && st.busy.every(([a, b]) => e + VEH_GAP <= a || b + VEH_GAP <= s));
   const spareDriver = (dep) => (spareOrder[dep] || []).find((d) => !usedD.has(d.id)) || null;
   const addCancel = (info, trip, reason, knownAt) => {
     const sim = { trip, block: info.block, vehicle: null, driver: null, substitute: false, cancelled: { reason, knownAt }, arr: [], dep: [], events: [], accident: null, endT: null };
     byTrip.set(trip.id, sim); info.sims.push(sim);
   };
-  const events = blocks.map((b) => ({ t: b.span[0], kind: 'start', block: b }));
-  const runBlock = (info, from, vehicle, driver, sub) => {
-    const trips = info.block.trips; let prevEnd = -Infinity;
-    for (let i = from; i < trips.length; i++) {
-      const trip = trips[i];
-      const sim = simulateTrip(trip, Math.max(trip.dep, prevEnd + turn), driver, rngFrom(hashStr(date + '|' + trip.id)));
-      Object.assign(sim, { trip, block: info.block, vehicle, driver, substitute: sub, cancelled: null });
-      byTrip.set(trip.id, sim); info.sims.push(sim);
-      if (sim.accident) { events.push({ t: sim.accident.t, kind: 'accident', info, idx: i, vehicle }); return; }
-      prevEnd = sim.endT;
-    }
+  const pri = { accident: 0, dep: 1, start: 2 };
+  const Q = new MinHeap((a, b) => a.t - b.t || pri[a.kind] - pri[b.kind] || a.seq - b.seq);
+  let seq = 0; const push = (ev) => { ev.seq = seq++; Q.push(ev); };
+  for (const b of blocks) push({ t: b.span[0], kind: 'start', block: b });
+  const segLast = new Map(); // 区間（停留所→次の停留所）ごとに、最後に通ったバスの着・発時刻
+  const startTrip = (run, k, readyAt) => {
+    const trip = run.trips[k]; const T = trip.times; const rng = rngFrom(hashStr(date + '|' + trip.id));
+    const skill = clamp(run.driver?.skill ?? 3, 1, 5) - 1, svc = clamp(run.driver?.service ?? 3, 1, 5) - 1;
+    const sim = { trip, block: run.info.block, vehicle: run.vehicle, driver: run.driver, substitute: run.sub, cancelled: null, arr: new Array(T.length).fill(null), dep: new Array(T.length).fill(null), events: [], accident: null, endT: null };
+    sim.dep[trip.s] = Math.max(T[trip.s][1], readyAt); sim.arr[trip.s] = sim.dep[trip.s];
+    if (sim.dep[trip.s] - T[trip.s][1] >= 1) sim.events.push({ type: 'late', at: trip.s, min: sim.dep[trip.s] - T[trip.s][1], text: '前便の遅れを引き継いで発車' });
+    Object.assign(run, { k, sim, rng, skill, svc, zone: zonePlan(trip, rng, skill) });
+    byTrip.set(trip.id, sim); run.info.sims.push(sim);
+    push({ t: sim.dep[trip.s], kind: 'dep', run, i: trip.s });
   };
-  // 時刻順に「運用の出庫」と「事故」を処理する
-  while (events.length) {
-    let k = 0; for (let i = 1; i < events.length; i++) if (events[i].t < events[k].t || (events[i].t === events[k].t && events[i].kind === 'accident' && events[k].kind !== 'accident')) k = i;
-    const ev = events.splice(k, 1)[0];
-    if (ev.kind === 'start') {
-      const b = ev.block, [s, e] = b.span;
-      const info = { block: b, vehicle: null, driver: null, spareDriver: false, sims: [], subs: [] }; byBlock.push(info);
-      const cands = (order[b.depot] || []).filter((st) => isFree(st, s, e));
-      // 担当乗務員が空いている車両 → 担当のいる車両 → 担当なしの車両 の順に選ぶ
-      const st = cands.find((x) => x.hasD && driversOfVehicle(x.v.id).some((d) => !usedD.has(d.id))) || cands.find((x) => x.hasD) || cands[0];
-      if (!st) { info.shortage = '車両不足'; for (const trip of b.trips) addCancel(info, trip, '車両不足', -Infinity); continue; }
-      let driver = rot(driversOfVehicle(st.v.id), di).find((d) => !usedD.has(d.id)) || null, spare = false;
-      if (!driver) { driver = spareDriver(b.depot); spare = !!driver; }
-      if (!driver) { info.shortage = '乗務員不足'; for (const trip of b.trips) addCancel(info, trip, '乗務員不足', -Infinity); continue; }
-      st.busy.push([s, e]); usedD.add(driver.id);
-      Object.assign(info, { vehicle: st.v, driver, spareDriver: spare });
-      runBlock(info, 0, st.v, driver, false);
-    } else {
-      // 事故：その車両はその日使えない。次の便は運休、以降は担当なしの予備車で代走（回送が間に合う便から）
-      const { info, idx } = ev; const trips = info.block.trips;
-      const bst = V.get(ev.vehicle.id); if (bst) bst.broken = ev.t;
-      let j = idx + 1;
-      if (j < trips.length) addCancel(info, trips[j++], '事故の影響', ev.t);
-      if (j >= trips.length) continue;
-      const ready = ev.t + prep, end = info.block.span[1];
-      const sub = (order[info.block.depot] || []).find((x) => !x.hasD && isFree(x, ready, end));
-      const d = sub ? spareDriver(info.block.depot) : null;
-      if (!sub || !d) {
-        const reason = !sub ? '車両不足（代走できる車両がない）' : '乗務員不足（代走できる乗務員がいない）';
-        for (; j < trips.length; j++) addCancel(info, trips[j], reason, ev.t);
-        continue;
-      }
-      let k2 = j; while (k2 < trips.length && ready + deadheadMin(info.block.depot, trips[k2].sys.stops[trips[k2].s].stopId) > trips[k2].dep) k2++;
-      for (; j < k2; j++) addCancel(info, trips[j], '事故の影響（代走車の回送が間に合わない）', ev.t);
-      if (j >= trips.length) continue;
-      sub.busy.push([ready, end]); usedD.add(d.id);
-      info.subs.push({ vehicle: sub.v, driver: d, from: j, t: ev.t });
-      runBlock(info, j, sub.v, d, true);
+  const onDep = (ev) => {
+    const { run, i } = ev; const { sim, rng } = run; const trip = sim.trip, T = trip.times, st = trip.sys.stops;
+    let j = i + 1; while (j <= trip.e && !T[j]) j++;
+    const sRun = Math.max(0, T[j][0] - T[i][1]); const band = bandAt(T[i][1]);
+    let extra = 0; const r1 = rng(), r2 = rng(), r3 = rng(), r4 = rng(), r5 = rng();
+    if (r1 < (band.p / 100) * F_DELAY[run.skill]) { extra = 1 + Math.floor(r2 * band.max); sim.events.push({ type: 'jam', at: j, min: extra, text: `${stopName(st[i].stopId)}→${stopName(st[j].stopId)} 間で混雑` }); }
+    const lateNow = sim.dep[i] - T[i][1], inZone = run.zone.cum[j] != null;
+    // 遅れの取り戻し：目安より大きく遅れているときは取り戻しやすい
+    const recP = (lateNow > (bandAt(T[i][1]).zhi ?? 0) + 1 ? 25 : S.recover) / 100 * F_RECOVER[run.skill];
+    if (!extra && lateNow >= 1 && sRun >= 2 && !inZone && r2 < recP) extra = -1;
+    const z = inZone ? Math.max(0, run.zone.total * run.zone.cum[j] - lateNow) : 0;
+    if (r3 < (S.accident / 100) * F_ACC[run.skill]) {
+      const f = 0.2 + r4 * 0.6; const t = sim.dep[i] + Math.max(0.4, sRun + extra + z) * f;
+      sim.accident = { from: i, to: j, f, t }; sim.endT = t;
+      sim.events.push({ type: 'accident', at: j, text: `${stopName(st[i].stopId)}→${stopName(st[j].stopId)} 間で事故、運転打ち切り` });
+      push({ t, kind: 'accident', run }); return;
     }
+    let arr = sim.dep[i] + Math.max(0.4, sRun + extra + z);
+    const key = st[i].stopId + '>' + st[j].stopId; const L = segLast.get(key);
+    let follow = false;
+    if (L && arr < L.arr + gapF) { arr = L.arr + gapF; follow = true; }
+    let d = j === trip.e ? arr : Math.max(T[j][1], arr);
+    if (j < trip.e && r5 < (S.trouble / 100) * F_TROUBLE[run.svc]) {
+      const m = 2 + Math.floor(rng() * 4); d += m;
+      sim.events.push({ type: 'trouble', at: j, min: m, text: `${stopName(st[j].stopId)}で乗客対応（${m}分）` });
+    }
+    // 前のバスが遅れて停車中なら、その発車を待って続いて出る（時刻調整で止まっているバスは待たない）
+    if (L && L.late && j < trip.e && arr <= L.dep && d < L.dep + gapF) { d = L.dep + gapF; follow = true; }
+    if (follow && !sim.events.some((e) => e.type === 'follow')) sim.events.push({ type: 'follow', at: j, text: `${stopName(st[j].stopId)}付近から前のバスに続いて続行運転` });
+    segLast.set(key, { arr, dep: d, late: d - T[j][1] >= 1 });
+    sim.arr[j] = arr; sim.dep[j] = d;
+    if (j === trip.e) {
+      sim.endT = arr;
+      if (run.k + 1 < run.trips.length) startTrip(run, run.k + 1, arr + turn);
+    } else push({ t: d, kind: 'dep', run, i: j });
+  };
+  const carryInfo = (b) => {
+    const prev = simDay(b.carryFrom.date, true).byBlock.find((x) => x.block.id === b.carryFrom.id);
+    if (!prev || !prev.vehicle) return { reason: '前日の滞泊運用が運休' };
+    const last = prev.subs.length ? prev.subs[prev.subs.length - 1] : { vehicle: prev.vehicle, driver: prev.driver };
+    const lastSim = prev.sims[prev.sims.length - 1];
+    if (lastSim?.cancelled || lastSim?.accident) return { reason: '前日の滞泊運用が運休' };
+    return { vehicle: last.vehicle, driver: last.driver };
+  };
+  // 車両と乗務員の割り当て（予約まで行う）
+  const allocate = (b) => {
+    let st, driver, spare = false;
+    if (b.carryFrom) {
+      const c = carryInfo(b); st = c.vehicle && V.get(c.vehicle.id); driver = c.driver;
+      if (!st || !driver || !isFree(st, b.segs)) return { reason: c.reason || '前日の滞泊運用が運休', short: '車両不足' };
+    } else {
+      const cands = (order[b.depot] || []).filter((x) => isFree(x, b.segs));
+      // 担当乗務員が空いている車両 → 担当のいる車両 → 担当なしの車両 の順に選ぶ
+      st = cands.find((x) => x.hasD && driversOfVehicle(x.v.id).some((d) => !usedD.has(d.id))) || cands.find((x) => x.hasD) || cands[0];
+      if (!st) return { reason: '車両不足', short: '車両不足' };
+      driver = rot(driversOfVehicle(st.v.id), di).find((d) => !usedD.has(d.id)) || null;
+      if (!driver) { driver = spareDriver(b.depot); spare = !!driver; }
+      if (!driver) return { reason: '乗務員不足', short: '乗務員不足' };
+    }
+    st.busy.push(...b.segs.map((x) => x.slice())); usedD.add(driver.id);
+    return { st, driver, spare };
+  };
+  // 滞泊する運用は、前日からの続きの有無に関係なく同じ車両・乗務員になるよう最初に割り当てる
+  const pre = new Map();
+  for (const b of blocks.filter((x) => x.duty?.overnight && !x.carryFrom).sort((x, y) => x.span[0] - y.span[0])) pre.set(b.id, allocate(b));
+  while (Q.size) {
+    const ev = Q.pop();
+    if (ev.kind === 'dep') { onDep(ev); continue; }
+    if (ev.kind === 'start') {
+      const b = ev.block;
+      const info = { block: b, vehicle: null, driver: null, spareDriver: false, sims: [], subs: [] }; byBlock.push(info);
+      const al = pre.get(b.id) || allocate(b);
+      if (al.reason) { info.shortage = al.short; for (const trip of b.trips) addCancel(info, trip, al.reason, -Infinity); continue; }
+      Object.assign(info, { vehicle: al.st.v, driver: al.driver, spareDriver: al.spare });
+      startTrip({ info, trips: b.trips, vehicle: al.st.v, driver: al.driver, sub: false }, 0, -Infinity);
+      continue;
+    }
+    // 事故：その車両はその日使えない。次の便は運休。以降は
+    //   ① 車庫の担当なしの予備車＋予備の乗務員、② その日に運用のない乗務員が自分の担当車で、の順に代走
+    const { run } = ev; const info = run.info, trips = run.trips;
+    const bst = V.get(run.vehicle.id); if (bst) bst.broken = ev.t;
+    let j = run.k + 1;
+    if (j < trips.length) addCancel(info, trips[j++], '事故の影響', ev.t);
+    if (j >= trips.length) continue;
+    const ready = ev.t + prep, end = info.block.span[1], segs = [[ready, end]], dep = info.block.depot;
+    let sub = (order[dep] || []).find((x) => !x.hasD && isFree(x, segs)), d = sub ? spareDriver(dep) : null, own = false;
+    if (!sub || !d) {
+      const dr = (spareOrder[dep] || []).find((x) => !usedD.has(x.id) && x.vehicleId && V.get(x.vehicleId) && V.get(x.vehicleId).v.depot === dep && isFree(V.get(x.vehicleId), segs));
+      if (dr) { sub = V.get(dr.vehicleId); d = dr; own = true; }
+    }
+    if (!sub || !d) {
+      const reason = !sub ? '車両不足（代走できる車両がない）' : '乗務員不足（代走できる乗務員がいない）';
+      for (; j < trips.length; j++) addCancel(info, trips[j], reason, ev.t);
+      continue;
+    }
+    let k2 = j; while (k2 < trips.length && ready + deadheadMin(dep, trips[k2].sys.stops[trips[k2].s].stopId) > trips[k2].dep) k2++;
+    for (; j < k2; j++) addCancel(info, trips[j], '事故の影響（代走車の回送が間に合わない）', ev.t);
+    if (j >= trips.length) continue;
+    sub.busy.push([ready, end]); usedD.add(d.id);
+    info.subs.push({ vehicle: sub.v, driver: d, from: j, t: ev.t, own });
+    startTrip({ info, trips, vehicle: sub.v, driver: d, sub: true }, j, -Infinity);
   }
   // 運用が設定されていない便は運休
   if (unassigned.length) { const none = { block: { id: 'none', depot: null, no: '—', trips: unassigned }, sims: [] }; for (const trip of unassigned) addCancel(none, trip, '運用未設定', -Infinity); }
+  if (noCarry) for (const b of bf.blocks.filter((x) => x.carryFrom)) { const none = { block: b, sims: [] }; for (const trip of b.trips) addCancel(none, trip, '前日の滞泊運用', -Infinity); }
   for (const b of byBlock) { const ix = new Map(b.block.trips.map((t, i) => [t.id, i])); b.sims.sort((x, y) => ix.get(x.trip.id) - ix.get(y.trip.id)); }
   const pools = {};
   for (const dep of G.depots) pools[dep.id] = { vehicles: (order[dep.id] || []).filter((x) => !x.hasD && !x.busy.length).map((x) => x.v), drivers: (spareOrder[dep.id] || []).filter((d) => !usedD.has(d.id)) };
-  const r = { byTrip, byBlock, pools }; caches.sim.set(date, r); return r;
+  const r = { byTrip, byBlock, pools }; caches.sim.set(ck, r); return r;
 }
 /* 運休が利用者に分かっているか（車両・乗務員不足は前もって、事故の影響は事故の発生後に分かる） */
 function knownCancel(sim, date) {
@@ -841,7 +995,7 @@ function loadFleet() {
   else if (pub && Array.isArray(pub.vehicles)) {
     state.fleet = { vehicles: pub.vehicles, drivers: pub.drivers || [], duties: Array.isArray(pub.duties) ? pub.duties : undefined, dutySrc: pub.dutySrc };
     if (!LS.get('temps', null) && Array.isArray(pub.temps)) state.temps = pub.temps;
-    if (!LS.get('settings', null) && pub.settings) state.settings = Object.assign({}, DEFAULT_SETTINGS, pub.settings);
+    if (!LS.get('settings', null) && pub.settings) { LS.set('settings', pub.settings); state.settings = loadSettings(); LS.del('settings'); }
   } else defaultFleet();
   state.dutyNotice = syncDuties();
   if (saved || state.dutyNotice) LS.set('fleet', state.fleet);
@@ -882,7 +1036,7 @@ function readFile(accept) {
 }
 function stars(n) { n = clamp(+n || 0, 0, 5); return `<span class="stars" aria-label="5段階中${n}">${'★'.repeat(n)}<i>${'★'.repeat(5 - n)}</i></span>`; }
 function routeDots(stop) {
-  const cols = [...new Set((stop.routes || []).map((r) => G.route[r]?.color).filter(Boolean))].slice(0, 6);
+  const cols = [...new Set(sortRouteIds(stop.routes).map((r) => G.route[r]?.color).filter(Boolean))].slice(0, 6);
   return cols.map((c) => `<i style="background:${esc(c)}"></i>`).join('');
 }
 
@@ -947,28 +1101,30 @@ function routeGroupsAt(stopId, deps) {
     g.cnt++; g.systems.add(d.trip.sys.no);
     if (!(d.trip.sys.circular && !g.ret)) g.dests.add(destOf(g, d.trip.sys, d.trip.e === d.trip.sys.n - 1 ? null : d.trip.e));
   }
-  const order = new Map(G.D.routes.map((r, i) => [r.id, i]));
+  const order = G.routeOrder;
   return [...map.values()].map((g) => {
     const dests = g.dests.size ? g.dests : g.allDests;
     return { ...g, systems: g.systems.size ? g.systems : g.allSys, label: g.loop ? (g.loop === '循環' ? '循環' : `${g.loop}（循環）`) : `${[...dests].join('・')}方面` };
-  }).sort((a, b) => order.get(a.route.id) - order.get(b.route.id) || a.k.localeCompare(b.k));
+  }).map((g) => ({ ...g, systems: new Set([...g.systems].sort((a, b) => a.localeCompare(b, 'ja', { numeric: true }))) }))
+    .sort((a, b) => order.get(a.route.id) - order.get(b.route.id) || dirRank(a.k) - dirRank(b.k));
 }
+const dirRank = (k) => ({ down: 0, 'loop-down': 1, 'loop-up': 2, up: 3, ret: 4 })[k.split(':').slice(1).join(':')] ?? 5;
 const tt = { stop: LS.get('lastStop', null), date: null, group: 'all' };
 function viewTimetable(params) {
   if (params[0] && G.stop[params[0]]) { if (tt.stop !== params[0]) tt.group = 'all'; tt.stop = params[0]; }
   if (!tt.date) tt.date = serviceNow(true).date;
   app().innerHTML = `
-    <div class="page-title"><h1>停留所時刻表</h1><p>当面のあいだ、毎日平日ダイヤで運行しています。</p></div>
+    <div class="page-title"><h1>停留所時刻表</h1><p>土曜・日曜・祝日と年末年始（12/30〜1/3）は土休日ダイヤで運行します。</p></div>
     <div class="panel">
       <div class="row">
         <label class="field grow picker" style="min-width:220px"><span>停留所</span><input type="search" id="ttStop" placeholder="停留所名を入力（例：一花バスターミナル）"></label>
-        <label class="field" style="width:170px"><span>日付</span><input type="date" id="ttDate" value="${tt.date}"></label>
+        <label class="field" style="width:170px"><span>日付 <span id="ttDay" class="muted" style="font-weight:400">${esc(dayInfo(tt.date).label)}</span></span><input type="date" id="ttDate" value="${tt.date}"></label>
       </div>
       <div id="ttPopular" class="stack" style="margin-top:12px"></div>
     </div>
     <div id="ttBody" style="margin-top:14px"></div>`;
   const pk = stopPicker($('#ttStop'), (s) => { location.hash = '#/timetable/' + s.id; });
-  $('#ttDate').onchange = (e) => { if (e.target.value) { tt.date = e.target.value; renderTT(); } };
+  $('#ttDate').onchange = (e) => { if (e.target.value) { tt.date = e.target.value; $('#ttDay').textContent = dayInfo(tt.date).label; renderTT(); } };
   if (tt.stop && G.stop[tt.stop]) { pk.set(tt.stop); LS.set('lastStop', tt.stop); }
   $('#ttPopular').innerHTML = `<div class="small muted">主な停留所（始発・終点）</div><div class="chips">${popularStops().map((s) => `<a class="chip" href="#/timetable/${s.id}" style="text-decoration:none;color:inherit">${esc(s.name)}</a>`).join('')}</div>`;
   renderTT();
@@ -1007,7 +1163,7 @@ function renderTT() {
   box.innerHTML = `
     <div class="panel" style="margin-bottom:12px">${chips}</div>
     <section class="pole" aria-label="${esc(stop.name)} の時刻表">
-      <div class="pole-head"><div><div class="sub">${cur ? `${esc(cur.route.name)}　${esc(cur.label)}` : 'すべての路線'}</div><h2>${esc(stop.name)}</h2></div><div class="sub">${dateJa(tt.date)}　平日ダイヤ${isToday && nextIdx >= 0 ? `　次の発車 ${fmt(shown[nextIdx].t)}` : ''}</div></div>
+      <div class="pole-head"><div><div class="sub">${cur ? `${esc(cur.route.name)}　${esc(cur.label)}` : 'すべての路線'}</div><h2>${esc(stop.name)}</h2></div><div class="sub">${dateJa(tt.date)}　${esc(dayInfo(tt.date).label)}${dayInfo(tt.date).holiday ? `（${esc(dayInfo(tt.date).holiday)}）` : ''}${isToday && nextIdx >= 0 ? `　次の発車 ${fmt(shown[nextIdx].t)}` : ''}</div></div>
       ${shown.length ? `<table class="tt"><tbody>${rows}</tbody></table>` : `<div class="empty">この日の発車予定はありません。</div>`}
       <div class="tt-legend"><span>時刻を押すと、その便が停車する停留所と運賃を確認できます。</span>${!cur ? '<span>数字の下は系統番号</span>' : multiDest ? '<span>数字の下は行先</span>' : ''}<span><span class="tag temp">臨</span> 臨時便</span>${cancelN ? '<span><span class="tag stop">運休</span> 運休が決まった便</span>' : ''}${isToday ? '<span>黄色の枠は次に発車する便</span>' : ''}</div>
     </section>`;
@@ -1057,7 +1213,7 @@ function viewStop(params) {
     sp.q = q.value; const v = q.value.trim();
     if (!v && id) { $('#spList').innerHTML = ''; return; }
     const items = v ? G.stopsActive.filter((s) => s.name.includes(v)).sort((a, b) => (b.name.startsWith(v) - a.name.startsWith(v)) || a.name.localeCompare(b.name, 'ja')) : popularStops();
-    $('#spList').innerHTML = items.length ? `<div class="small muted">${v ? `${items.length}件` : '主な停留所（始発・終点）'}</div><div class="stoprows">${items.slice(0, 50).map((s) => `<a class="stoprow" href="#/stop/${esc(s.id)}"><b>${esc(s.name)}</b><span class="rtags">${(s.routes || []).map((r) => G.route[r]).filter(Boolean).map((r) => `<span class="rtag" style="--rc:${esc(r.color)}">${esc(r.name)}</span>`).join('')}</span></a>`).join('')}</div>${items.length > 50 ? '<p class="small muted">ほかにもあります。名前を詳しく入力してください。</p>' : ''}` : `<div class="empty">「${esc(v)}」を含む停留所は見つかりませんでした。</div>`;
+    $('#spList').innerHTML = items.length ? `<div class="small muted">${v ? `${items.length}件` : '主な停留所（始発・終点）'}</div><div class="stoprows">${items.slice(0, 50).map((s) => `<a class="stoprow" href="#/stop/${esc(s.id)}"><b>${esc(s.name)}</b><span class="rtags">${sortRouteIds(s.routes).map((r) => G.route[r]).filter(Boolean).map((r) => `<span class="rtag" style="--rc:${esc(r.color)}">${esc(r.name)}</span>`).join('')}</span></a>`).join('')}</div>${items.length > 50 ? '<p class="small muted">ほかにもあります。名前を詳しく入力してください。</p>' : ''}` : `<div class="empty">「${esc(v)}」を含む停留所は見つかりませんでした。</div>`;
   };
   q.oninput = list; list();
   if (!id) return;
@@ -1072,10 +1228,9 @@ function viewStop(params) {
         <div><h2 style="font-size:26px">${esc(stop.name)}</h2><div class="chips" style="margin-top:6px">${term ? '<span class="tag">始発・終点</span>' : ''}${stop.timeAdjust ? '<span class="tag">時間調整を行う停留所</span>' : ''}${depot ? `<span class="tag">${esc(depot.name)}</span>` : ''}</div></div>
         <div class="row"><a class="btn" href="#/timetable/${esc(id)}">時刻表を見る</a><button class="btn" id="spFrom">ここから乗る</button><button class="btn" id="spTo">ここまで行く</button></div>
       </div>
-      <div class="tablewrap"><table class="data"><thead><tr><th>路線</th><th>方面</th><th>系統</th><th>本日の発車</th><th>本数</th></tr></thead><tbody>${groups.map((g) => `<tr><td><span class="legend-dot" style="background:${esc(g.color)}"></span>${esc(g.route.name)}</td><td>${esc(g.label)}</td><td>${[...g.systems].map(esc).join('・')}</td><td>${firstLast(g.k)}</td><td class="num">${g.cnt}</td></tr>`).join('')}</tbody></table></div>
     </section>
     <div class="live" style="margin-top:14px">
-      <section class="panel stack"><div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><h2 style="font-size:18px">バスの接近</h2><span class="small muted" id="spClock"></span></div><div id="spApp"></div><h2 style="font-size:18px;margin-top:6px">まもなく発車</h2><div id="spNext"></div></section>
+      <section class="panel stack"><div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px"><h2 style="font-size:18px">のりば案内（先発・次発）</h2><span class="small muted" id="spClock"></span></div><div id="spBoard"></div><h2 style="font-size:18px;margin-top:6px">バスの接近</h2><div id="spApp"></div><h2 style="font-size:18px;margin-top:6px">まもなく発車</h2><div id="spNext"></div></section>
       <section class="panel" style="padding:0;overflow:hidden"><svg id="spMap" style="width:100%;height:340px;display:block" role="img" aria-label="${esc(stop.name)}周辺の地図とバスの位置"></svg><p class="small muted" style="margin:0;padding:8px 12px">黄色の丸が${esc(stop.name)}です。この停留所に向かうバスを大きく表示しています。</p></section>
     </div>`;
   const go = (k) => { sr[k] = id; LS.set('search', sr); location.hash = '#/search'; };
@@ -1097,15 +1252,33 @@ function viewStop(params) {
       const where = a.atStop ? '<b>この停留所に停車中</b>' : a.pos.state === 'stop' ? `${a.away}つ前の ${esc(stopName(st[a.pos.prev].stopId))} に停車中` : a.away === 1 ? `<b>まもなく到着</b>（${esc(stopName(st[a.pos.prev].stopId))}を発車）` : `${a.away}つ前の ${esc(stopName(st[a.pos.prev].stopId))} を発車`;
       return `<div class="busrow" data-trip="${esc(a.sim.trip.id)}" data-idx="${a.k}" tabindex="0"><span>${routeBadge(a.sim.trip.sys)}</span><span><b>${esc(tripDestName(a.sim.trip))}</b>${a.last ? ' <span class="small muted">（ここが終点）</span>' : ''}<div class="w">${where}${a.delay > 0 ? ` <span class="tag late">約${a.delay}分遅れ</span>` : ''}</div></span><span style="text-align:right"><b style="font-size:18px">${a.atStop ? '停車中' : min <= 0 ? 'まもなく' : `約${min}分`}</b><div class="small muted">${a.sim.vehicle ? esc(a.sim.vehicle.no) : ''}</div></span></div>`;
     }).join('') + (more ? `<p class="small muted" style="margin:6px 0 0">ほかに${more}台が30分以内に到着する予定です。</p>` : '') : `<div class="empty" style="padding:14px">30分以内にこの停留所に着くバスはありません。</div>`;
+    // 路線・方面ごとの先発・次発
+    const sims = simDay(sn.date).byTrip;
+    const apMap0 = new Map(ap.map((a) => [a.sim.trip.id, a]));
+    const allDeps = departuresAt(id, sn.date); const grs = routeGroupsAt(id, allDeps).filter((g) => g.cnt);
+    const firstLast = (k) => { const ds = allDeps.filter((d) => d.key === k); return ds.length ? `${fmt(ds[0].t)}〜${fmt(ds[ds.length - 1].t)}` : ''; };
+    const cell = (d) => {
+      if (!d) return '<span class="muted">—</span>';
+      const a = apMap0.get(d.trip.id); const dl = a?.delay || 0;
+      const multi = new Set(allDeps.filter((x) => x.key === d.key).map((x) => tripDestName(x.trip))).size > 1;
+      return `<button class="linkbtn" data-trip="${esc(d.trip.id)}" data-idx="${d.idx}"><b style="font-size:17px">${fmt(d.t)}</b></button>${multi ? ` <span class="small">${esc(tripDestName(d.trip))}</span>` : ''}${a ? (dl > 0 ? ` <span class="tag late">約${dl}分遅れ</span>` : ' <span class="tag ontime">接近中</span>') : ''}`;
+    };
+    const upcoming = (k) => allDeps.filter((d) => {
+      if (d.key !== k) return false; const sm = sims.get(d.trip.id);
+      if (knownCancel(sm, sn.date)) return false;
+      if (!sm || sm.cancelled || sm.dep[d.idx] == null) return d.t >= sn.t;
+      return sm.dep[d.idx] > sn.t;
+    }).slice(0, 2);
+    $('#spBoard').innerHTML = grs.length ? `<div class="tablewrap"><table class="data board"><thead><tr><th>路線・方面</th><th>先発</th><th>次発</th></tr></thead><tbody>${grs.map((g) => { const [a, b] = upcoming(g.k); return `<tr><td style="white-space:normal"><span class="legend-dot" style="background:${esc(g.color)}"></span><b>${esc(g.route.name)}</b><div class="small">${esc(g.label)}</div><div class="small muted">${[...g.systems].map(esc).join('・')}　${firstLast(g.k)}・${g.cnt}本</div></td><td>${cell(a)}</td><td>${cell(b)}</td></tr>`; }).join('')}</tbody></table></div>` : '<div class="empty">この停留所から発車する便はありません。</div>';
     // 発車予定
-    const sims = simDay(sn.date).byTrip; const dl = departuresAt(id, sn.date).filter((d) => d.t >= sn.t - 1).slice(0, 8);
+    const dl = departuresAt(id, sn.date).filter((d) => d.t >= sn.t - 1).slice(0, 8);
     const apMap = new Map(ap.map((a) => [a.sim.trip.id, a]));
     $('#spNext').innerHTML = dl.length ? `<div class="tablewrap"><table class="data"><tbody>${dl.map((d) => {
       const c = knownCancel(sims.get(d.trip.id), sn.date); const a = apMap.get(d.trip.id);
       const status = c ? '<span class="tag stop">運休</span>' : a ? (a.delay > 0 ? `<span class="tag late">約${a.delay}分遅れ</span>` : '<span class="tag ontime">接近中</span>') : '';
       return `<tr data-trip="${esc(d.trip.id)}" data-idx="${d.idx}" style="cursor:pointer;${c ? 'opacity:.6' : ''}"><td><b style="font-size:16px;${c ? 'text-decoration:line-through' : ''}">${fmt(d.t)}</b></td><td>${routeBadge(d.trip.sys)}</td><td style="white-space:normal">${esc(tripDestName(d.trip))}</td><td>${status}</td></tr>`;
     }).join('')}</tbody></table></div>` : '<div class="empty" style="padding:14px">本日このあと発車する便はありません。</div>';
-    $$('#spApp [data-trip], #spNext [data-trip]').forEach((el) => { el.onclick = () => openTrip(el.dataset.trip, sn.date, +el.dataset.idx); });
+    $$('#spApp [data-trip], #spNext [data-trip], #spBoard [data-trip]').forEach((el) => { el.onclick = () => openTrip(el.dataset.trip, sn.date, +el.dataset.idx); });
     // 地図上のバス
     const near = activeSims(sn.date, sn.t).filter(({ pos }) => Math.abs(pos.x - stop.x) < R + 4 && Math.abs(pos.y - stop.y) < R);
     $('#spBus').innerHTML = near.map(({ sim, pos }) => { const big = apMap.has(sim.trip.id); const r = big ? 2.6 : 1.6; return `<g><circle cx="${pos.x}" cy="${pos.y}" r="${r}" fill="${pos.state === 'accident' ? 'var(--danger)' : esc(sim.trip.sys.color)}" stroke="#fff" stroke-width="1.5" vector-effect="non-scaling-stroke"/>${big ? `<text x="${pos.x}" y="${pos.y + 0.8}" text-anchor="middle" style="font-size:2.1px;font-weight:700;fill:#fff">${esc(sim.trip.sys.no.replace(/^[^\d]+/, ''))}</text>` : ''}<title>${esc(sim.trip.sys.no + ' ' + tripDestName(sim.trip))}</title></g>`; }).join('');
@@ -1158,7 +1331,7 @@ function openTrip(tripId, date, boardIdx) {
     if (pos && (pos.state === 'run' || pos.state === 'accident') && i === pos.prev) rows += `<li><span></span><span class="node"></span><span class="nm"><span class="tag ${pos.state === 'accident' ? 'stop' : 'late'}">${pos.state === 'accident' ? 'この区間で事故・運転打ち切り' : 'バス走行中'}</span></span><span></span></li>`;
   }
   const live = kc && !isLive ? `<div class="livebox">${cancelText(kc)}</div>` : sim && isLive ? `<div class="livebox"><div class="row" style="align-items:center;justify-content:space-between"><div class="grow">${liveStatusHTML(sim, pos, sn.t, date)}<div class="small muted">${fmt(sn.t)} 時点</div></div>${pos ? plateHTML(sim) : ''}</div></div>` : '';
-  const body = `${live}<p class="small muted" style="margin:0 0 10px">${dateJa(date)}　${esc(trip.sys.route?.name || '')}　${trip.temp ? '<span class="tag temp">臨時便</span> ' + esc(trip.note || '') : ''}${hasBoard ? '　運賃は乗車停留所からの金額（現金・大人／小児）' : ''}</p>
+  const body = `${live}<p class="small muted" style="margin:0 0 10px">${dateJa(date)}（${esc(dayInfo(date).label)}）　${esc(trip.sys.route?.name || '')}　${trip.temp ? '<span class="tag temp">臨時便</span> ' + esc(trip.note || '') : ''}${hasBoard ? '　運賃は乗車停留所からの金額（現金・大人／小児）' : ''}</p>
     <ol class="stoplist" style="--rc:${esc(trip.sys.color)}">${rows}</ol>`;
   const foot = pos ? `<a class="btn primary" href="#/live/${encodeURIComponent(trip.id)}" data-close>走行位置を地図で見る</a>` : '';
   modal(`${routeBadge(trip.sys)} ${esc(tripDestName(trip))}　<span class="muted" style="font-size:14px">${fmt(trip.dep)}発</span>`, body, { foot });
@@ -1211,7 +1384,7 @@ function runSearch() {
   if (!res.length) { box.innerHTML = `<div class="panel empty">${mode === 'dep' ? `${esc(fmt(t0))} 以降に` : 'この日は'} ${esc(stopName(B))} へ着ける便が見つかりませんでした。${mode === 'dep' ? '時刻を早めるか、日付を変えて検索してください。' : '出発・到着の停留所を確認してください。'}</div>`; return; }
   const head = mode === 'first' ? '初発から' : mode === 'last' ? '終車から順に' : `${fmt(t0)} 以降`;
   const badge = (n) => mode === 'first' ? (n === 0 ? '<span class="tag ontime">初発</span>' : '') : mode === 'last' ? (n === 0 ? '<span class="tag stop">終車</span>' : '<span class="tag">終車の1本前</span>'.replace('1', String(n))) : (n === 0 ? '<span class="tag ontime">いちばん早く着く</span>' : '');
-  box.innerHTML = `<p class="small muted" style="margin:0 0 8px">${esc(stopName(A))} → ${esc(stopName(B))}　${dateJa(date)} ${head}${skip.size ? `　（運休が決まっている${skip.size}便を除いています）` : ''}</p>` + res.map((j, n) => {
+  box.innerHTML = `<p class="small muted" style="margin:0 0 8px">${esc(stopName(A))} → ${esc(stopName(B))}　${dateJa(date)}（${esc(dayInfo(date).label)}） ${head}${skip.size ? `　（運休が決まっている${skip.size}便を除いています）` : ''}</p>` + res.map((j, n) => {
     let adult = 0, child = 0, fareOk = true;
     const legs = j.legs.map((l, k) => {
       const a = fareBetween(l.trip.sys, l.i, l.j); if (a == null) fareOk = false; else { adult += a; child += childFare(a); }
@@ -1228,20 +1401,95 @@ function runSearch() {
   $$('[data-trip]', box).forEach((b) => b.onclick = () => openTrip(b.dataset.trip, date, +b.dataset.idx));
 }
 
+/* ================= 時刻の表示（現在時刻／指定時刻・倍速）：走行位置と路線ごとで共通 ================= */
+function clockBarHTML() {
+  return `<div class="clockbar">
+      <div class="clock" id="lvClock" aria-live="off">--:--</div>
+      <label class="field" style="width:150px"><span>表示する時刻</span><select id="lvMode"><option value="real">現在時刻</option><option value="custom">時刻を指定</option></select></label>
+      <label class="field" id="lvCustomWrap" style="width:210px" ${clock.mode === 'real' ? 'hidden' : ''}><span>日時</span><input type="datetime-local" id="lvAt"></label>
+      <label class="field" id="lvSpeedWrap" style="width:120px" ${clock.mode === 'real' ? 'hidden' : ''}><span>進み方</span><select id="lvSpeed">${[1, 10, 30, 60].map((v) => `<option value="${v}" ${clock.speed === v ? 'selected' : ''}>${v === 1 ? '等速' : v + '倍速'}</option>`).join('')}</select></label>
+    </div>`;
+}
+function bindClockBar(tick) {
+  $('#lvMode').value = clock.mode;
+  const at = $('#lvAt'); const nd = nowDate(); at.value = `${dateStr(nd)}T${pad2(nd.getHours())}:${pad2(nd.getMinutes())}`;
+  $('#lvMode').onchange = (e) => {
+    if (e.target.value === 'real') { clock.mode = 'real'; } else { const d = nowDate(); clock.mode = 'custom'; clock.base = d.getTime(); clock.setAt = Date.now(); clock.speed = +$('#lvSpeed').value; }
+    $('#lvCustomWrap').hidden = $('#lvSpeedWrap').hidden = clock.mode === 'real'; tick();
+  };
+  at.onchange = () => { const d = new Date(at.value); if (!isNaN(d)) { clock.mode = 'custom'; clock.base = d.getTime(); clock.setAt = Date.now(); tick(); } };
+  $('#lvSpeed').onchange = (e) => { const d = nowDate(); clock.base = d.getTime(); clock.setAt = Date.now(); clock.speed = +e.target.value; };
+}
+function clockText(sn) { return `${fmt(sn.t)}<small>${dateJa(dateStr(sn.d))}・${esc(dayInfo(sn.date).label)}${clock.mode === 'custom' ? '・指定時刻' : ''}</small>`; }
+
+/* ================= 路線ごとの走行位置 ================= */
+const rv = { route: LS.get('rvRoute', null), line: null };
+function viewRoute(params) {
+  if (params[0] && G.route[params[0]]) { if (rv.route !== params[0]) rv.line = null; rv.route = params[0]; }
+  if (!rv.route || !G.route[rv.route]) rv.route = G.routesSorted[0]?.id;
+  LS.set('rvRoute', rv.route);
+  const route = G.route[rv.route];
+  const lines = route.lines.filter((l) => Object.values(G.sys).some((s) => s.routeId === route.id && s.lineId === l.id));
+  if (!lines.some((l) => l.id === rv.line)) rv.line = lines[0]?.id;
+  const line = lines.find((l) => l.id === rv.line) || route.lines[0];
+  const sysOf = (rid) => Object.values(G.sys).filter((s) => s.routeId === rid).map((s) => s.no);
+  const uniq = (a) => [...new Set(a)].sort((x, y) => x.localeCompare(y, 'ja', { numeric: true }));
+  const stops = line.stops;
+  const downSys = Object.values(G.sys).find((s) => s.routeId === route.id && s.lineId === line.id && s.direction === 'down');
+  const upSys = Object.values(G.sys).find((s) => s.routeId === route.id && s.lineId === line.id && s.direction === 'up');
+  const head = (s, fallback) => s ? (s.circular ? sysLabel(s) : `${stopName(s.destination)}方面`) : fallback;
+  app().innerHTML = `
+    <div class="page-title"><h1>路線ごとの走行位置</h1><p>路線を選ぶと、停留所の並びに沿ってバスのいまの位置を表示します。</p></div>
+    ${clockBarHTML()}
+    <div class="panel" style="margin-bottom:12px"><div class="chips" id="rvChips">${G.routesSorted.map((r) => `<a class="chip" href="#/route/${esc(r.id)}" aria-pressed="${r.id === route.id}" style="text-decoration:none;${r.id === route.id ? '' : 'color:inherit'}"><span class="sw" style="background:${esc(r.color)}"></span>${esc(r.name)} <span class="small" style="opacity:.7">${esc(uniq(sysOf(r.id)).join('・'))}</span> <span class="rvcnt" data-r="${esc(r.id)}"></span></a>`).join('')}</div>
+      ${lines.length > 1 ? `<div class="chips" style="margin-top:10px">${lines.map((l) => `<button class="chip" data-line="${esc(l.id)}" aria-pressed="${l.id === line.id}">${esc(l.name)}（${esc(stopName(l.stops[0]))}〜${esc(stopName(l.stops[l.stops.length - 1]))}）</button>`).join('')}</div>` : ''}</div>
+    <section class="panel">
+      <div class="rv" style="--rc:${esc(route.color)}">
+        <div class="rv-head"><div>↓ ${esc(head(downSys, stopName(stops[stops.length - 1]) + '方面'))}</div><div><b>${esc(route.name)}</b>${lines.length > 1 ? `<div class="small muted">${esc(line.name)}</div>` : ''}</div><div>↑ ${esc(head(upSys, stopName(stops[0]) + '方面'))}</div></div>
+        ${stops.map((sid, i) => `<div class="rv-row"><div class="rv-l" id="rvL-s${i}"></div><div class="rv-c"><span class="rv-dot ${G.stop[sid]?.timeAdjust ? 'adj' : ''}"></span><a href="#/stop/${esc(sid)}">${esc(stopName(sid))}</a></div><div class="rv-r" id="rvR-s${i}"></div></div>${i < stops.length - 1 ? `<div class="rv-row gap"><div class="rv-l" id="rvL-g${i}"></div><div class="rv-c"></div><div class="rv-r" id="rvR-g${i}"></div></div>` : ''}`).join('')}
+      </div>
+      <p class="small muted" style="margin:10px 0 0">◆は基準停（時間調整を行う停留所）です。バスを押すと、行先・遅れ・車番を確認できます。</p>
+    </section>`;
+  $$('[data-line]').forEach((b) => b.onclick = () => { rv.line = b.dataset.line; viewRoute([]); });
+  const tick = () => {
+    const clk = $('#lvClock'); if (!clk) return;
+    const sn = serviceNow(); clk.innerHTML = clockText(sn);
+    const act = activeSims(sn.date, sn.t);
+    const cnt = {}; for (const a of act) cnt[a.sim.trip.sys.routeId] = (cnt[a.sim.trip.sys.routeId] || 0) + 1;
+    $$('.rvcnt').forEach((e) => { const n = cnt[e.dataset.r] || 0; e.textContent = n ? `${n}台` : ''; e.className = 'rvcnt' + (n ? ' on' : ''); });
+    const cells = {};
+    for (const { sim, pos } of act) {
+      const sys = sim.trip.sys; if (sys.routeId !== route.id || sys.lineId !== line.id) continue;
+      const a = sys.lineMap[pos.prev], b = sys.lineMap[pos.next]; if (a == null || b == null) continue;
+      const side = sys.direction === 'up' ? 'R' : 'L';
+      const id = pos.state === 'stop' || a === b ? `rv${side}-s${a}` : `rv${side}-g${Math.min(a, b)}`;
+      const lab = sys.no.replace(/^[^\d]+/, '') || sys.no;
+      const tag = pos.state === 'accident' ? '<span class="tag stop">事故</span>' : pos.delay > 0 ? `<span class="tag late">${pos.delay}分遅れ</span>` : '';
+      (cells[id] ||= []).push(`<button class="rbus ${pos.state === 'accident' ? 'acc' : ''}" data-trip="${esc(sim.trip.id)}" title="${esc(sys.no + ' ' + tripDestName(sim.trip))}"><span class="rb-ar">${side === 'L' ? '▼' : '▲'}</span><b>${esc(lab)}</b> <span class="rb-d">${esc(tripDestName(sim.trip).replace(/行$/, ''))}</span>${tag}<span class="vno small">${sim.vehicle ? esc(sim.vehicle.no) : ''}</span></button>`);
+    }
+    $$('.rv-l, .rv-r').forEach((el) => { const h = (cells[el.id] || []).join(''); if (el._h !== h) { el._h = h; el.innerHTML = h; } });
+  };
+  $('.rv').addEventListener('click', (e) => {
+    const b = e.target.closest('.rbus'); if (!b) return;
+    const sn = serviceNow(); const sim = simDay(sn.date).byTrip.get(b.dataset.trip); if (!sim) return;
+    const pos = posAt(sim, sn.t);
+    const dl = modal(`${routeBadge(sim.trip.sys)} ${esc(tripDestName(sim.trip))}`, `<div class="livebox" style="margin:0"><div style="display:flex;justify-content:space-between;gap:10px;align-items:flex-start"><div><div class="small muted">${fmt(sim.trip.dep)} ${esc(stopName(sim.trip.sys.stops[sim.trip.s].stopId))}発</div><div style="margin-top:6px">${liveStatusHTML(sim, pos, sn.t, sn.date)}</div></div>${plateHTML(sim)}</div>${sim.vehicle ? `<div style="margin-top:10px">${vehicleInfoHTML(sim.vehicle)}</div>` : ''}</div>`,
+      { foot: `<button class="btn" id="rvStops">停車停留所</button><a class="btn primary" href="#/live/${encodeURIComponent(sim.trip.id)}" data-close>地図で見る</a>` });
+    $('#rvStops', dl).onclick = () => { dl.close(); openTrip(sim.trip.id, sn.date, null); };
+  });
+  bindClockBar(tick); tick();
+  const iv = setInterval(tick, 1000); onCleanup(() => clearInterval(iv));
+}
+
 /* ================= 走行位置 ================= */
 const lv = { sel: null, route: 'all', vb: null };
 function viewLive(params) {
   if (params[0]) lv.sel = decodeURIComponent(params[0]);
   const sn = serviceNow();
-  const routesOpt = G.D.routes.map((r) => `<option value="${esc(r.id)}" ${lv.route === r.id ? 'selected' : ''}>${esc(r.name)}</option>`).join('');
+  const routesOpt = G.routesSorted.map((r) => `<option value="${esc(r.id)}" ${lv.route === r.id ? 'selected' : ''}>${esc(r.name)}</option>`).join('');
   app().innerHTML = `
     <div class="page-title"><h1>走行位置</h1><p>バスのいまの位置を地図に表示します。渋滞や乗客対応で遅れることがあります。</p></div>
-    <div class="clockbar">
-      <div class="clock" id="lvClock" aria-live="off">--:--</div>
-      <label class="field" style="width:150px"><span>表示する時刻</span><select id="lvMode"><option value="real">現在時刻</option><option value="custom">時刻を指定</option></select></label>
-      <label class="field" id="lvCustomWrap" style="width:210px" ${clock.mode === 'real' ? 'hidden' : ''}><span>日時</span><input type="datetime-local" id="lvAt"></label>
-      <label class="field" id="lvSpeedWrap" style="width:120px" ${clock.mode === 'real' ? 'hidden' : ''}><span>進み方</span><select id="lvSpeed">${[1, 10, 30, 60].map((v) => `<option value="${v}" ${clock.speed === v ? 'selected' : ''}>${v === 1 ? '等速' : v + '倍速'}</option>`).join('')}</select></label>
-    </div>
+    ${clockBarHTML()}
     <div class="live">
       <div class="mapwrap" id="lvMap">
         <svg id="lvSvg" role="img" aria-label="路線図とバスの位置"></svg>
@@ -1254,14 +1502,7 @@ function viewLive(params) {
         <div><div class="small muted" id="lvCount"></div><div class="buslist" id="lvList"></div></div>
       </aside>
     </div>`;
-  $('#lvMode').value = clock.mode;
-  const at = $('#lvAt'); const nd = nowDate(); at.value = `${dateStr(nd)}T${pad2(nd.getHours())}:${pad2(nd.getMinutes())}`;
-  $('#lvMode').onchange = (e) => {
-    if (e.target.value === 'real') { clock.mode = 'real'; } else { const d = nowDate(); clock.mode = 'custom'; clock.base = d.getTime(); clock.setAt = Date.now(); clock.speed = +$('#lvSpeed').value; }
-    $('#lvCustomWrap').hidden = $('#lvSpeedWrap').hidden = clock.mode === 'real'; tick();
-  };
-  at.onchange = () => { const d = new Date(at.value); if (!isNaN(d)) { clock.mode = 'custom'; clock.base = d.getTime(); clock.setAt = Date.now(); tick(); } };
-  $('#lvSpeed').onchange = (e) => { const d = nowDate(); clock.base = d.getTime(); clock.setAt = Date.now(); clock.speed = +e.target.value; };
+  bindClockBar(tick);
   $('#lvRoute').onchange = (e) => { lv.route = e.target.value; tick(); };
   $('#lvFind').onsubmit = (e) => { e.preventDefault(); findVehicle($('#lvNo').value.trim()); };
   buildMap();
@@ -1325,7 +1566,7 @@ function centerOn(x, y) {
 function tick() {
   const clk = $('#lvClock'); if (!clk) return;
   const sn = serviceNow();
-  clk.innerHTML = `${fmt(sn.t)}<small>${dateJa(dateStr(sn.d))}${clock.mode === 'custom' ? '・指定時刻' : ''}</small>`;
+  clk.innerHTML = clockText(sn);
   const all = activeSims(sn.date, sn.t);
   const shown = all.filter((a) => lv.route === 'all' || a.sim.trip.sys.routeId === lv.route);
   $$('#lyRoutes polyline').forEach((p) => p.setAttribute('opacity', lv.route === 'all' || p.dataset.r === lv.route ? '.75' : '.12'));
@@ -1804,7 +2045,7 @@ function admBlocks() {
   const cmpNo = (a, b) => String(a).localeCompare(String(b), 'ja', { numeric: true });
   const rows = sd.byBlock.slice().sort((a, b) => a.block.depot.localeCompare(b.block.depot) || cmpNo(a.block.no, b.block.no));
   const shownIds = new Set(rows.map((r) => r.block.id));
-  const idle = state.fleet.duties.filter((d) => !shownIds.has(d.id) && !(d.trips.length && d.trips.every((id) => id.startsWith('tmp_'))));
+  const dinf = dayInfo(blkDate); const idle = state.fleet.duties.filter((d) => dutyApplies(d, dinf) && !shownIds.has(d.id) && !(d.trips.length && d.trips.every((id) => id.startsWith('tmp_'))));
   const evCount = (b, type) => b.sims.reduce((n, s) => n + s.events.filter((e) => e.type === type).length, 0);
   const cancelCount = (b) => b.sims.filter((s) => s.cancelled).length;
   const totalAcc = rows.reduce((n, b) => n + evCount(b, 'accident'), 0), totalTr = rows.reduce((n, b) => n + evCount(b, 'trouble'), 0);
@@ -1812,10 +2053,10 @@ function admBlocks() {
   const byReason = {}; for (const s of cancels) { const r = s.cancelled.reason.replace(/（.*）/, ''); byReason[r] = (byReason[r] || 0) + 1; }
   const noV = rows.filter((b) => b.shortage === '車両不足').length, noD = rows.filter((b) => b.shortage === '乗務員不足').length;
   const spare = G.depots.map((d) => `${esc(depotShort(d.id))} 車両${sd.pools[d.id]?.vehicles.length ?? 0}台・乗務員${sd.pools[d.id]?.drivers.length ?? 0}人`).join('　');
-  box.innerHTML = `<div class="row" style="margin-bottom:12px;align-items:flex-end"><label class="field" style="width:170px"><span>日付</span><input type="date" id="bDate" value="${blkDate}"></label>
+  box.innerHTML = `<div class="row" style="margin-bottom:12px;align-items:flex-end"><label class="field" style="width:200px"><span>日付 <span class="muted" style="font-weight:400">${esc(dayInfo(blkDate).label)}${dayInfo(blkDate).holiday ? `・${esc(dayInfo(blkDate).holiday)}` : ''}</span></span><input type="date" id="bDate" value="${blkDate}"></label>
     <div class="row grow" style="justify-content:flex-end">${shortage().total ? '<button class="btn primary" id="bShort">足りない車両・乗務員を追加</button>' : ''}<button class="btn" id="bAdd">運用を追加</button>${unassigned.length ? '<button class="btn" id="bFill">運用未設定の便から運用を作る</button>' : ''}<button class="btn danger" id="bReset">運用を作り直す</button></div></div>
     ${state.dutyNotice ? `<div class="note" style="border-color:var(--brand);margin:0 0 12px"><b>${esc(state.dutyNotice)}</b></div>` : ''}
-    <p class="note" style="margin:0 0 12px">運用に入っている便だけが運行し、どの運用にも入っていない便は「運用未設定」で運休になります。運用の行を押すと、便の追加・取り外し、名前や所属の変更ができます。車両は出庫から入庫までの時間が重ならなければ、1日に複数の運用に入れます。担当乗務員のいる車両から順に使い、1人の乗務員は1日1運用までです。車両か乗務員が足りない運用は終日運休、事故の後は担当なしの予備車で代走します（回送が間に合わない便は運休）。</p>
+    <p class="note" style="margin:0 0 12px">運用に入っている便だけが運行し、どの運用にも入っていない便は「運用未設定」で運休になります。運用の行を押すと、便の追加・取り外し、名前や所属の変更ができます。車両は出庫から入庫までの時間が重ならなければ、1日に複数の運用に入れます。担当乗務員のいる車両から順に使い、1人の乗務員は1日1運用までです。車両か乗務員が足りない運用は終日運休、事故の後は、担当なしの予備車か、その日に運用のない乗務員が自分の担当車で代走します（回送が間に合わない便は運休）。</p>
     <div class="grid2" style="margin-bottom:14px">
       <div class="panel"><div class="small muted">運用数</div><div style="font-size:22px;font-weight:700">${rows.length}</div><div class="small muted">同時に必要な車両 最大${Object.values(blocksFor(blkDate).needVeh).reduce((a, b) => a + b, 0)}台・必要な乗務員 ${rows.length}人</div>${noV || noD ? `<div class="small" style="color:var(--danger)">${noV ? `車両不足 ${noV}運用` : ''}${noV && noD ? '・' : ''}${noD ? `乗務員不足 ${noD}運用` : ''}</div>` : ''}</div>
       <div class="panel"><div class="small muted">運休</div><div style="font-size:22px;font-weight:700">${cancels.length}便 <span class="small muted" style="font-weight:400">／ ${allSims.length}便</span></div>${cancels.length ? `<div class="small muted">${Object.entries(byReason).map(([k, v]) => `${esc(k)} ${v}`).join('・')}</div>` : ''}</div>
@@ -1905,7 +2146,7 @@ function openDuty(dutyId) {
   const { unassigned } = blocksFor(blkDate);
   const cand = unassigned.filter((t) => { const dep = G.depots.find((x) => x.id === duty.depot); return !dep || !(dep.routes || []).length || dep.routes.includes(t.sys.routeId); });
   const warns = dutyWarnings(b.block.trips);
-  const subs = b.subs.map((x) => `<br>${fmt(x.t)}ごろの事故のあと、${esc(x.vehicle.no)}（${esc(driverName(x.driver))}）が代走`).join('');
+  const subs = b.subs.map((x) => `<br>${fmt(x.t)}ごろの事故のあと、${esc(x.vehicle.no)}（${esc(driverName(x.driver))}${x.own ? '・自分の担当車' : ''}）が代走`).join('');
   const body = `<form class="row" id="du" style="margin-bottom:10px" autocomplete="off"><label class="field" style="width:140px"><span>運用名</span><input type="text" name="no" value="${esc(duty.no)}" maxlength="12"></label><label class="field" style="width:220px"><span>所属</span><select name="depot">${depotOptions(duty.depot)}</select></label><button class="btn" type="submit">変更を保存</button><button class="btn danger" type="button" id="duDel" style="margin-left:auto">この運用を削除</button></form>
     <p class="small muted" style="margin-top:0">${dateJa(blkDate)}　車番 ${b.vehicle ? esc(b.vehicle.no) : b.sims.length ? 'なし（車両不足）' : '—'}　乗務員 ${b.driver ? esc(driverName(b.driver)) + `（運転${b.driver.skill}・接客${b.driver.service}${b.spareDriver ? '・予備' : ''}）` : 'なし'}${subs}</p>
     ${warns.length ? `<div class="note" style="border-color:var(--warn);margin-bottom:10px">${warns.map(esc).join('<br>')}</div>` : ''}
@@ -1916,7 +2157,7 @@ function openDuty(dutyId) {
       return `<tr><td>${routeBadge(t.sys)}${t.temp ? ' <span class="tag temp">臨</span>' : ''}</td><td>${esc(tripDestName(t))}</td><td>${fmt(t.dep)}</td><td>${fmt(s.dep[t.s])}</td><td>${fmt(t.end)}</td><td>${a == null ? '<span class="tag stop">打ち切り</span>' : `${fmt(a)}${a - t.end >= 1 ? ` <span class="tag late">+${Math.round(a - t.end)}</span>` : ''}`}</td><td>${s.vehicle ? esc(s.vehicle.no) : '—'}${s.substitute ? ' <span class="small muted">代走</span>' : ''}</td><td style="white-space:normal;min-width:180px">${s.events.filter((e) => e.type !== 'jam').map((e) => esc(e.text)).join('<br>')}${s.events.some((e) => e.type === 'jam') ? `${s.events.some((e) => e.type !== 'jam') ? '<br>' : ''}<span class="small muted">${s.events.filter((e) => e.type === 'jam').length}区間で混雑</span>` : ''}</td>${rm}</tr>`;
     }).join('')}</tbody></table></div>` : '<div class="panel empty">この日に運行する便はありません。</div>'}
     <div class="row" style="margin-top:12px;align-items:flex-end"><label class="field grow" style="min-width:240px"><span>運用未設定の便を追加（${cand.length}本）</span><select id="duAddSel">${cand.length ? cand.map((t) => `<option value="${esc(t.id)}">${fmt(t.dep)} ${esc(t.sys.no)} ${esc(stopName(t.sys.stops[t.s].stopId))} → ${esc(tripDestName(t))}（〜${fmt(t.end)}）${t.temp ? '【臨】' : ''}</option>`).join('') : '<option value="">追加できる便はありません</option>'}</select></label><button class="btn primary" id="duAdd" ${cand.length ? '' : 'disabled'}>追加する</button></div>
-    <p class="small muted">便を外すと、どの運用にも入っていない便になり運休します。運用はダイヤの毎日に共通です（臨時便はその日だけ）。</p>`;
+    <p class="small muted">便を外すと、どの運用にも入っていない便になり運休します。運用は同じ種類のダイヤ（平日／土休日）の日に共通です（臨時便はその日だけ）。</p>`;
   const dl = modal(`運用 ${esc(depotShort(duty.depot))} ${esc(duty.no)}`, body, { wide: true });
   const reopen = () => { dl.close(); admBlocks(); openDuty(dutyId); };
   $('#du', dl).onsubmit = (e) => {
@@ -2015,13 +2256,14 @@ function admSettings() {
   box.innerHTML = `
     <form class="panel stack" id="sf">
       <h2 style="font-size:17px">遅延の起こりやすさ</h2>
-      <p class="small muted" style="margin:0">停留所間を1区間走るたびに、時間帯ごとの確率で所定より時間がかかります（運転技術3のときの値）。運転技術が高いほど起こりにくくなります。</p>
-      <div class="tablewrap"><table class="data"><thead><tr><th>時間帯</th><th>時刻</th><th>区間ごとの発生率（%）</th><th>1回の遅れ（最大・分）</th></tr></thead><tbody>${S.bands.map((b, i) => `<tr><td>${esc(b.name)}</td><td>${fmt(b.from)}〜${b.to >= 1440 + 180 ? '終車' : fmt(b.to)}</td><td><input type="number" step="0.1" min="0" max="100" name="p${i}" value="${b.p}" style="width:110px"></td><td><input type="number" min="1" max="15" name="m${i}" value="${b.max}" style="width:90px"></td></tr>`).join('')}</tbody></table></div>
+      <p class="small muted" style="margin:0">停留所間を1区間走るたびに、時間帯ごとの確率で所定より時間がかかります（混雑）。さらに、基準停（時間調整を行う停留所）の前後の区間では、1便あたり指定した範囲の遅れが生じます。値は運転技術3のときのもので、運転技術が高いほど遅れは小さくなります。</p>
+      <div class="tablewrap"><table class="data"><thead><tr><th>時間帯</th><th>時刻</th><th>混雑の発生率（区間ごと・%）</th><th>混雑1回の遅れ（最大・分）</th><th>基準停付近の遅れ（1便あたり・分）</th></tr></thead><tbody>${S.bands.map((b, i) => `<tr><td>${esc(b.name)}</td><td>${fmt(b.from)}〜${b.to >= 1440 + 180 ? '終車' : fmt(b.to)}</td><td><input type="number" step="0.1" min="0" max="100" name="p${i}" value="${b.p}" style="width:100px"></td><td><input type="number" min="1" max="15" name="m${i}" value="${b.max}" style="width:80px"></td><td><input type="number" step="0.5" min="0" max="60" name="zl${i}" value="${b.zlo ?? 0}" style="width:80px"> 〜 <input type="number" step="0.5" min="0" max="60" name="zh${i}" value="${b.zhi ?? 0}" style="width:80px"></td></tr>`).join('')}</tbody></table></div>
       <div class="grid2">
         <label class="field"><span>事故の発生率（区間ごと・%）</span><input type="number" step="0.001" min="0" max="5" name="acc" value="${S.accident}"></label>
         <label class="field"><span>乗客とのトラブル発生率（停留所ごと・%）</span><input type="number" step="0.01" min="0" max="20" name="tro" value="${S.trouble}"></label>
         <label class="field"><span>遅れを1分取り戻せる確率（%）</span><input type="number" step="1" min="0" max="100" name="rec" value="${S.recover}"></label>
         <label class="field"><span>折返しに必要な時間（分）</span><input type="number" min="0" max="30" name="turn" value="${S.turnaround}"></label>
+        <label class="field"><span>続行運転で前のバスとあける間隔（分）</span><input type="number" step="0.1" min="0" max="5" name="follow" value="${S.follow ?? 0.5}"></label>
         <label class="field"><span>事故から代走車が出庫できるまで（分）</span><input type="number" min="0" max="180" name="prep" value="${S.prep ?? 10}"></label>
       </div>
       <p class="note">運転技術1〜5で、遅延の発生率は ${F_DELAY.join('・')} 倍、事故の発生率は ${F_ACC.join('・')} 倍になります。接客態度1〜5で、トラブルの発生率は ${F_TROUBLE.join('・')} 倍になります。</p>
@@ -2062,8 +2304,8 @@ function admSettings() {
   const f = $('#sf');
   f.onsubmit = (e) => {
     e.preventDefault();
-    S.bands = S.bands.map((b, i) => ({ ...b, p: clamp(+f['p' + i].value || 0, 0, 100), max: clamp(Math.round(+f['m' + i].value || 1), 1, 15) }));
-    S.accident = clamp(+f.acc.value || 0, 0, 5); S.trouble = clamp(+f.tro.value || 0, 0, 20); S.recover = clamp(+f.rec.value || 0, 0, 100); S.turnaround = clamp(Math.round(+f.turn.value || 0), 0, 30); S.prep = clamp(Math.round(+f.prep.value || 0), 0, 180);
+    S.bands = S.bands.map((b, i) => { const zl = clamp(+f['zl' + i].value || 0, 0, 60), zh = clamp(+f['zh' + i].value || 0, 0, 60); return { ...b, p: clamp(+f['p' + i].value || 0, 0, 100), max: clamp(Math.round(+f['m' + i].value || 1), 1, 15), zlo: Math.min(zl, zh), zhi: Math.max(zl, zh) }; });
+    S.accident = clamp(+f.acc.value || 0, 0, 5); S.trouble = clamp(+f.tro.value || 0, 0, 20); S.recover = clamp(+f.rec.value || 0, 0, 100); S.turnaround = clamp(Math.round(+f.turn.value || 0), 0, 30); S.prep = clamp(Math.round(+f.prep.value || 0), 0, 180); S.follow = clamp(+f.follow.value || 0, 0, 5);
     saveSettings(); toast('設定を保存しました');
   };
   $('#sfReset').onclick = () => { state.settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)); saveSettings(); toast('設定を初期値に戻しました'); admSettings(); };
@@ -2107,7 +2349,7 @@ function admSettings() {
     try {
       const o = JSON.parse(txt); if (!Array.isArray(o.vehicles) || !Array.isArray(o.drivers)) throw new Error();
       if (!(await confirmBox(`車両 ${o.vehicles.length}台・乗務員 ${o.drivers.length}人・臨時便 ${(o.temps || []).length}本のデータで、いまのデータを置き換えます。`, '置き換える'))) return;
-      state.temps = o.temps || []; state.fleet = { vehicles: o.vehicles, drivers: o.drivers, duties: Array.isArray(o.duties) ? o.duties : undefined, dutySrc: o.dutySrc }; syncDuties(); if (o.settings) state.settings = Object.assign({}, DEFAULT_SETTINGS, o.settings);
+      state.temps = o.temps || []; state.fleet = { vehicles: o.vehicles, drivers: o.drivers, duties: Array.isArray(o.duties) ? o.duties : undefined, dutySrc: o.dutySrc }; syncDuties(); if (o.settings) { LS.set('settings', o.settings); state.settings = loadSettings(); }
       if (o.plateCsv) LS.set('plateCsv', o.plateCsv); if (o.modelCsv) LS.set('modelCsv', o.modelCsv); loadRefData();
       LS.set('fleet', state.fleet); LS.set('temps', state.temps); LS.set('settings', state.settings); bump(); toast('バックアップを読み込みました'); admSettings();
     } catch { toast('読み込めませんでした。このアプリで書き出したJSONを選んでください'); }
@@ -2134,7 +2376,7 @@ function route() {
   const parts = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean);
   const name = parts[0] || 'timetable';
   $$('#nav a').forEach((a) => { if (a.dataset.r === name) a.setAttribute('aria-current', 'page'); else a.removeAttribute('aria-current'); });
-  const v = { timetable: viewTimetable, stop: viewStop, search: viewSearch, live: viewLive, admin: viewAdmin }[name] || viewTimetable;
+  const v = { timetable: viewTimetable, stop: viewStop, search: viewSearch, live: viewLive, route: viewRoute, admin: viewAdmin }[name] || viewTimetable;
   v(parts.slice(1));
   window.scrollTo(0, 0);
 }
