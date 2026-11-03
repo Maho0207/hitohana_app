@@ -3,7 +3,7 @@
  * 事業者向け: 車両 / 乗務員（担当車）/ 運用表 / 臨時便 / 設定
  */
 'use strict';
-const APP_VERSION = '2026-11-01';
+const APP_VERSION = '2026-11-01.2';
 
 /* ================= utilities ================= */
 const $ = (s, r = document) => r.querySelector(s);
@@ -473,9 +473,11 @@ const F_ZONE = [1.3, 1.15, 1.0, 0.85, 0.7]; // 運転技術 → 基準停付近�
 /* ================= 遅れやすい地点 =================
    1行に1地点：停留所名,深夜早朝の遅れ,日中の遅れ,ラッシュ帯の遅れ（分。「3」や「3~5」のように範囲も可） */
 function defaultDelayText() {
-  return G.D.stops.filter((x) => x.timeAdjust && G.stopSys[x.id]).map((x) => `${x.name},0~0.5,3.5~5.5,10~20`).join('\n');
+  return '# 停留所名,深夜早朝の遅れ,日中の遅れ,ラッシュ帯の遅れ（分。3~5 のような範囲も可）\n' + G.D.stops.filter((x) => x.timeAdjust && G.stopSys[x.id]).map((x) => `${x.name},0~0.5,3.5~5.5,10~20`).join('\n');
 }
-function delayText() { return state.settings.delayText ?? defaultDelayText(); }
+/* 遅れやすい地点の文面：このブラウザで試している内容 → delays.txt → 初期値（時間調整を行う停留所）の順に使う */
+function delayText() { return state.settings.delayText ?? window.DELAY_TEXT ?? defaultDelayText(); }
+function delaySource() { return state.settings.delayText != null ? 'trial' : window.DELAY_TEXT != null ? 'file' : 'default'; }
 function parseRange(v) {
   const t = String(v ?? '').normalize('NFKC').replace(/分/g, '').trim(); if (!t) return null;
   const m = /^(\d+(?:\.\d+)?)\s*(?:[~〜\-ー－]\s*(\d+(?:\.\d+)?))?$/.exec(t); if (!m) return undefined;
@@ -936,8 +938,8 @@ function genVehicles(n, opt, rng = Math.random) {
   for (let k = 0; k < n; k++) {
     const depot = opt.depot === 'auto' ? G.depots[k % G.depots.length].id : opt.depot;
     const { region, kanji } = depotPlate(depot);
-    const cands = REF.models.filter((m) => templateYears(m).some((y) => y >= opt.yearFrom && y <= opt.yearTo));
-    if (!cands.length) { errors.push(`${opt.yearFrom}〜${opt.yearTo}年に製造された車種テンプレートがありません`); break; }
+    const cands = REF.models.filter((m) => (!opt.size || m.size === opt.size) && templateYears(m).some((y) => y >= opt.yearFrom && y <= opt.yearTo));
+    if (!cands.length) { errors.push(`${opt.yearFrom}〜${opt.yearTo}年に製造された${opt.size ? opt.size + 'の' : ''}車種テンプレートがありません`); break; }
     const free = []; for (let i = 1; i <= 999; i++) { const no = kanji + String(i).padStart(3, '0'); if (!usedNo.has(no)) free.push(no); }
     if (!free.length) { errors.push(`車番「${kanji}001〜${kanji}999」がすべて使われています`); continue; }
     const no = opt.seq ? free[0] : pick(rng, free);
@@ -1208,7 +1210,7 @@ function renderTT() {
   box.innerHTML = `
     <div class="panel" style="margin-bottom:12px">${chips}</div>
     <section class="pole" aria-label="${esc(stop.name)} の時刻表">
-      <div class="pole-head"><div><div class="sub">${cur ? `${esc(cur.route.name)}　${esc(cur.label)}` : 'すべての路線'}</div>${stop.kana ? `<div class="sub" style="opacity:.85">${esc(stop.kana)}</div>` : ''}<h2>${esc(stop.name)}</h2></div><div class="sub">${dateJa(tt.date)}　${esc(dayInfo(tt.date).label)}${dayInfo(tt.date).holiday ? `（${esc(dayInfo(tt.date).holiday)}）` : ''}${isToday && nextIdx >= 0 ? `　次の発車 ${fmt(shown[nextIdx].t)}` : ''}</div></div>
+      <div class="pole-head"><div><div class="sub">${cur ? `${esc(cur.route.name)}　${esc(cur.label)}` : 'すべての路線'}</div>${stop.kana ? `<div class="sub" style="opacity:.85">${esc(stop.kana)}</div>` : ''}<h2>${esc(stop.name)}</h2><a class="btn sm" href="#/stop/${esc(tt.stop)}" style="margin-top:8px;background:var(--on-brand);color:var(--brand);border-color:var(--on-brand)">停留所情報・バスの接近を見る</a></div><div class="sub">${dateJa(tt.date)}　${esc(dayInfo(tt.date).label)}${dayInfo(tt.date).holiday ? `（${esc(dayInfo(tt.date).holiday)}）` : ''}${isToday && nextIdx >= 0 ? `　次の発車 ${fmt(shown[nextIdx].t)}` : ''}</div></div>
       ${shown.length ? `<table class="tt"><tbody>${rows}</tbody></table>` : `<div class="empty">この日の発車予定はありません。</div>`}
       <div class="tt-legend"><span>時刻を押すと、その便が停車する停留所と運賃を確認できます。</span>${!cur ? '<span>数字の下は系統番号</span>' : multiDest ? '<span>数字の下は行先</span>' : ''}<span><span class="tag temp">臨</span> 臨時便</span>${cancelN ? '<span><span class="tag stop">運休</span> 運休が決まった便</span>' : ''}${isToday ? '<span>黄色の枠は次に発車する便</span>' : ''}</div>
     </section>`;
@@ -1220,12 +1222,13 @@ function renderTT() {
 /* ================= 停留所検索 ================= */
 function mapLines() {
   if (G.mapLines) return G.mapLines;
-  const lines = new Map();
-  for (const s of Object.values(G.sys)) {
-    const k = s.routeId + '|' + s.lineId; if (lines.has(k) && s.direction === 'up') continue;
-    lines.set(k, { color: s.color, rid: s.routeId, pts: s.stops.map((x) => G.stop[x.stopId]).filter(Boolean).map((p) => `${p.x},${p.y}`).join(' ') });
+  // 路線の線は、系統（途中止まりの系統もある）ではなく路線データの停留所の並びで描く
+  const out = []; const used = new Set(Object.values(G.sys).map((s) => s.routeId + '|' + s.lineId));
+  for (const r of G.routesSorted) for (const l of r.lines) {
+    if (!used.has(r.id + '|' + l.id)) continue;
+    out.push({ color: r.color, rid: r.id, pts: l.stops.map((x) => G.stop[x]).filter(Boolean).map((p) => `${p.x},${p.y}`).join(' ') });
   }
-  G.mapLines = [...lines.values()]; return G.mapLines;
+  G.mapLines = out; return G.mapLines;
 }
 /* 路線ごと・停留所ごとに、その日最後に着く便（運休が決まった便を除く） */
 let lastCache = { key: '', map: null };
@@ -1336,7 +1339,20 @@ function viewStop(params) {
       if (!sm || sm.cancelled || sm.dep[d.idx] == null) return d.t >= sn.t;
       return sm.dep[d.idx] > sn.t;
     }).slice(0, 2);
-    $('#spBoard').innerHTML = grs.length ? `<div class="tablewrap"><table class="data board"><thead><tr><th>路線・方面</th><th>先発</th><th>次発</th></tr></thead><tbody>${grs.map((g) => { const [a, b] = upcoming(g.k); return `<tr><td style="white-space:normal"><span class="legend-dot" style="background:${esc(g.color)}"></span><b>${esc(g.route.name)}</b><div class="small">${esc(g.label)}</div><div class="small muted">${[...g.systems].map(esc).join('・')}　${firstLast(g.k)}・${g.cnt}本</div></td><td>${cell(a)}</td><td>${cell(b)}</td></tr>`; }).join('')}</tbody></table></div>` : '<div class="empty">この停留所から発車する便はありません。</div>';
+    // 運行終了の判定：これから発車する便がなければ終了。行けなくなった停留所があれば「○○より先、○○方面へのバスは終了」
+    const endInfo = (k) => {
+      const all = allDeps.filter((d) => d.key === k && !knownCancel(sims.get(d.trip.id), sn.date));
+      const up = all.filter((d) => { const sm = sims.get(d.trip.id); if (!sm || sm.cancelled || sm.dep[d.idx] == null) return d.t >= sn.t; return sm.dep[d.idx] > sn.t; });
+      if (!up.length) return { over: true };
+      const reach = new Set(); for (const d of up) for (let x = d.idx + 1; x <= d.trip.e; x++) if (d.trip.times[x]) reach.add(d.trip.sys.stops[x].stopId);
+      const lost = all.filter((d) => !reach.has(d.trip.sys.stops[d.trip.e].stopId));
+      if (!lost.length) return null;
+      const dests = [...new Set(lost.map((d) => stopName(d.trip.sys.stops[d.trip.e].stopId)))];
+      const ref = lost[lost.length - 1]; let boundary = null;
+      for (let x = ref.idx + 1; x <= ref.trip.e; x++) { if (!ref.trip.times[x]) continue; const sid = ref.trip.sys.stops[x].stopId; if (reach.has(sid)) boundary = sid; else break; }
+      return { partial: true, text: `${boundary ? `${stopName(boundary)}より先、` : ''}${dests.join('・')}方面へのバスは本日終了しています` };
+    };
+    $('#spBoard').innerHTML = grs.length ? `<div class="tablewrap"><table class="data board"><thead><tr><th>路線・方面</th><th>先発</th><th>次発</th></tr></thead><tbody>${grs.map((g) => { const [a, b] = upcoming(g.k); const ei = endInfo(g.k); return `<tr${ei?.over ? ' style="opacity:.75"' : ''}><td style="white-space:normal"><span class="legend-dot" style="background:${esc(g.color)}"></span><b>${esc(g.route.name)}</b><div class="small">${esc(g.label)}</div><div class="small muted">${[...g.systems].map(esc).join('・')}　${firstLast(g.k)}・${g.cnt}本</div>${ei?.partial ? `<div class="small" style="color:var(--danger)">${esc(ei.text)}</div>` : ''}</td>${ei?.over ? '<td colspan="2"><b style="color:var(--muted)">本日の運行は終了しました</b></td>' : `<td>${cell(a)}</td><td>${cell(b)}</td>`}</tr>`; }).join('')}</tbody></table></div>` : '<div class="empty">この停留所から発車する便はありません。</div>';
     // 発車予定
     const dl = departuresAt(id, sn.date).filter((d) => d.t >= sn.t - 1).slice(0, 8);
     const apMap = new Map(ap.map((a) => [a.sim.trip.id, a]));
@@ -1493,6 +1509,7 @@ function clockText(sn) { return `${fmt(sn.t)}<small>${dateJa(dateStr(sn.d))}・$
 const rv = { route: LS.get('rvRoute', null), line: null };
 function viewRoute(params) {
   if (params[0] && G.route[params[0]]) { if (rv.route !== params[0]) rv.line = null; rv.route = params[0]; }
+  if (params[1]) rv.line = decodeURIComponent(params[1]);
   if (!rv.route || !G.route[rv.route]) rv.route = G.routesSorted[0]?.id;
   LS.set('rvRoute', rv.route);
   const route = G.route[rv.route];
@@ -1517,7 +1534,7 @@ function viewRoute(params) {
       </div>
       <p class="small muted" style="margin:10px 0 0">◆は基準停（時間調整を行う停留所）です。バスを押すと、行先・遅れ・車番を確認できます。</p>
     </section>`;
-  $$('[data-line]').forEach((b) => b.onclick = () => { rv.line = b.dataset.line; viewRoute([]); });
+  $$('[data-line]').forEach((b) => b.onclick = () => { location.hash = `#/route/${encodeURIComponent(route.id)}/${encodeURIComponent(b.dataset.line)}`; });
   const tick = () => {
     const clk = $('#lvClock'); if (!clk) return;
     const sn = serviceNow(); clk.innerHTML = clockText(sn);
@@ -1867,6 +1884,7 @@ function randomVehicles() {
   const d = modal('車両をランダムに追加', `<form class="stack" id="rv">
     <div class="grid2"><label class="field"><span>台数</span><input type="number" name="n" value="10" min="1" max="500"></label>
     <label class="field"><span>所属</span><select name="depot">${depotOptions('', '<option value="auto" selected>各営業所に均等</option>')}</select></label>
+    <label class="field"><span>大きさ</span><select name="size"><option value="">すべての大きさ</option>${[...new Set(REF.models.map((m) => m.size))].map((z) => `<option>${esc(z)}</option>`).join('')}</select></label>
     <label class="field"><span>年式（から）</span><input type="number" name="y0" value="${y - 15}" min="1950" max="2100"></label>
     <label class="field"><span>年式（まで）</span><input type="number" name="y1" value="${y}" min="1950" max="2100"></label></div>
     <fieldset style="border:1px solid var(--line);border-radius:8px;padding:10px 12px"><legend class="small" style="font-weight:700">車番の付け方</legend>
@@ -1874,11 +1892,11 @@ function randomVehicles() {
       <label style="display:flex;gap:8px;align-items:center"><input type="radio" name="seq" value="1"> 空いている番号を小さい順に埋める</label>
     </fieldset>
     <label style="display:flex;gap:8px;align-items:flex-start"><input type="checkbox" name="assign" style="margin-top:5px"> <span>追加した車両に、担当車を持っていない乗務員を1台につき1人ずつ割り当てる<br><span class="small muted">同じ営業所の在籍者から社員番号順に割り当てます。足りないときは、残りの車両は担当なしの予備車になります。</span></span></label>
-    <p class="note">車種は車種テンプレートから、年式の範囲内で製造されていたものを選びます。車番は「営業所の漢字＋数字3桁」（漢字は設定で変更できます）、登録番号はナンバー表の範囲から重ならないように付けます。</p></form>`,
+    <p class="note">車種は車種テンプレートから、指定した大きさ・年式の範囲内で製造されていたものを選びます。車番は「営業所の漢字＋数字3桁」（漢字は設定で変更できます）、登録番号はナンバー表の範囲から重ならないように付けます。</p></form>`,
   { foot: '<button class="btn" data-close>キャンセル</button><button class="btn primary" id="rvGo">追加する</button>' });
   $('#rvGo', d).onclick = () => {
     const f = $('#rv', d); const n = clamp(+f.n.value || 0, 1, 500); let y0 = +f.y0.value, y1 = +f.y1.value; if (y0 > y1) [y0, y1] = [y1, y0];
-    const made = genVehicles(n, { depot: f.depot.value, yearFrom: y0, yearTo: y1, seq: f.seq.value === '1' });
+    const made = genVehicles(n, { depot: f.depot.value, yearFrom: y0, yearTo: y1, seq: f.seq.value === '1', size: f.size.value || null });
     let k = 0;
     if (made.length) { state.fleet.vehicles.push(...made); if (f.assign.checked) k = assignFreeDriversTo(made); saveFleet(); }
     d.close();
@@ -2325,11 +2343,13 @@ function admSettings() {
       <h2 style="font-size:17px">遅延の起こりやすさ</h2>
       <p class="small muted" style="margin:0">停留所間を1区間走るたびに、時間帯ごとの確率で所定より時間がかかります（混雑）。値は運転技術3のときのもので、運転技術が高いほど遅れは小さくなります。時間帯の区分（深夜早朝・日中・ラッシュ帯）は、下の「遅れやすい地点」でも使います。</p>
       <div class="tablewrap"><table class="data"><thead><tr><th>時間帯</th><th>時刻</th><th>区分</th><th>混雑の発生率（区間ごと・%）</th><th>混雑1回の遅れ（最大・分）</th></tr></thead><tbody>${S.bands.map((b, i) => `<tr><td>${esc(b.name)}</td><td>${fmt(b.from)}〜${b.to >= 1440 + 180 ? '終車' : fmt(b.to)}</td><td><select name="c${i}" style="width:auto;min-height:34px;padding:4px 8px">${Object.entries(CAT_NAME).map(([k, v]) => `<option value="${k}" ${b.cat === k ? 'selected' : ''}>${v}</option>`).join('')}</select></td><td><input type="number" step="0.1" min="0" max="100" name="p${i}" value="${b.p}" style="width:100px"></td><td><input type="number" min="1" max="15" name="m${i}" value="${b.max}" style="width:80px"></td></tr>`).join('')}</tbody></table></div>
-      <h3 style="font-size:15px;margin-top:6px">遅れやすい地点</h3>
+      <h3 style="font-size:15px;margin-top:6px">遅れやすい地点（delays.txt）</h3>
+      <div class="note" style="border-color:${delaySource() === 'trial' ? 'var(--warn)' : 'var(--brand)'}">${delaySource() === 'file' ? 'リポジトリの <code>delays.txt</code> を読み込んでいます。内容を変えるときは delays.txt を編集してコミットしてください。' : delaySource() === 'trial' ? '<b>このブラウザだけで、下の内容を試しています。</b>公開サイトに反映するには「delays.txt として書き出す」で作ったファイルをリポジトリの delays.txt と置き換えてください。' : '<code>delays.txt</code> を読み込めなかったため、初期値（時間調整を行う停留所）を使っています。ローカルで index.html を直接開いた場合はファイルを読み込めません。'}</div>
       <p class="small muted" style="margin:0">1行に1地点ずつ「<b>停留所名,深夜早朝の遅れ,日中の遅れ,ラッシュ帯の遅れ</b>」（分）で書きます。「4」のような数字のほか、「3~5」のように範囲も書けます。その地点と手前の区間で、バスの遅れがその時間帯の目安まで広がります（すでに遅れているときは上乗せしません）。停留所名はひらがなでも書けます。#で始まる行は無視します。</p>
       <textarea name="delayText" rows="10" spellcheck="false" style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px" placeholder="富谷西,0,4,15">${esc(delayText())}</textarea>
       <div id="dlCheck" class="small"></div>
-      <div class="row"><button class="btn sm" type="button" id="dlDefault">初期値（時間調整を行う停留所）を入れる</button><button class="btn sm" type="button" id="dlClear">すべて消す</button></div>
+      <div class="row"><button class="btn sm" type="button" id="dlExport">delays.txt として書き出す</button>${delaySource() === 'trial' ? '<button class="btn sm" type="button" id="dlFile">試すのをやめて delays.txt に戻す</button>' : ''}<button class="btn sm" type="button" id="dlDefault">初期値（時間調整を行う停留所）を入れる</button><button class="btn sm" type="button" id="dlClear">すべて消す</button></div>
+      <p class="small muted" style="margin:0">ここで内容を変えて「設定を保存する」を押すと、このブラウザだけで試せます。</p>
       <div class="grid2">
         <label class="field"><span>事故の発生率（区間ごと・%）</span><input type="number" step="0.001" min="0" max="5" name="acc" value="${S.accident}"></label>
         <label class="field"><span>乗客とのトラブル発生率（停留所ごと・%）</span><input type="number" step="0.01" min="0" max="20" name="tro" value="${S.trouble}"></label>
@@ -2378,7 +2398,8 @@ function admSettings() {
     e.preventDefault();
     const chk = parseDelayPoints(f.delayText.value); if (chk.errors.length) { toast('遅れやすい地点の書き方に誤りがあります'); $('#dlCheck').scrollIntoView({ block: 'center' }); return; }
     S.bands = S.bands.map((b, i) => ({ ...b, cat: f['c' + i].value, p: clamp(+f['p' + i].value || 0, 0, 100), max: clamp(Math.round(+f['m' + i].value || 1), 1, 15) }));
-    S.delayText = f.delayText.value.trim() === defaultDelayText().trim() ? null : f.delayText.value;
+    const base = (window.DELAY_TEXT ?? defaultDelayText()).trim();
+    S.delayText = f.delayText.value.trim() === base ? null : f.delayText.value;
     S.accident = clamp(+f.acc.value || 0, 0, 5); S.trouble = clamp(+f.tro.value || 0, 0, 20); S.recover = clamp(+f.rec.value || 0, 0, 100); S.turnaround = clamp(Math.round(+f.turn.value || 0), 0, 30); S.prep = clamp(Math.round(+f.prep.value || 0), 0, 180); S.follow = clamp(+f.follow.value || 0, 0, 5);
     saveSettings(); toast('設定を保存しました');
   };
@@ -2389,6 +2410,8 @@ function admSettings() {
   f.delayText.oninput = dlChk; dlChk();
   $('#dlDefault').onclick = () => { f.delayText.value = defaultDelayText(); dlChk(); };
   $('#dlClear').onclick = () => { f.delayText.value = ''; dlChk(); };
+  $('#dlExport').onclick = () => { const v = f.delayText.value.replace(/\r\n/g, '\n'); download('delays.txt', (v.endsWith('\n') ? v : v + '\n'), 'text/plain'); };
+  const dlf = $('#dlFile'); if (dlf) dlf.onclick = () => { S.delayText = null; saveSettings(); toast('delays.txt の内容に戻しました'); admSettings(); };
   $('#sfReset').onclick = () => { state.settings = JSON.parse(JSON.stringify(DEFAULT_SETTINGS)); saveSettings(); toast('設定を初期値に戻しました'); admSettings(); };
   $('#pf').onsubmit = (e) => {
     e.preventDefault(); const p = e.target;
