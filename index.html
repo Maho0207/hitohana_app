@@ -286,27 +286,41 @@ footer{max-width:1180px;margin:0 auto;padding:0 16px 30px;font-size:12px;color:v
 <footer>このサイトは架空のバス会社「一花交通」のデモです。実在の事業者・路線・人物とは関係ありません。<span id="appVer"></span></footer>
 
 <script>
-/* 読み込み：ページを更新したとき、古いJSがブラウザのキャッシュから使われないように、
+/* 読み込み：ページを更新したとき、古いファイルがブラウザのキャッシュから使われないように、
    各ファイルを毎回サーバーに確認してから読み込みます（変わっていなければ通信はごくわずかです）。
-   ローカルで index.html を直接開いたとき（file://）は通常の読み込みにします。 */
+   案内データは、data/manifest.json があれば分割出力（data フォルダ）を、なければ data.js を使います。
+   ローカルで index.html を直接開いたとき（file://）は data.js を通常の方法で読み込みます。 */
 (function () {
   var files = ['config.js', 'data.js', 'names.js', 'templates.js', 'fleet.js', 'app.js'];
-  function plain(i) {
-    if (i >= files.length) return;
-    var s = document.createElement('script'); s.src = files[i];
-    s.onload = function () { plain(i + 1); };
-    s.onerror = function () { document.getElementById('app').innerHTML = '<div class="panel empty">' + files[i] + ' を読み込めませんでした。</div>'; };
+  function fail(msg) { document.getElementById('app').innerHTML = '<div class="panel empty">' + msg + '</div>'; }
+  function plain(list, i) {
+    if (i >= list.length) return;
+    var s = document.createElement('script'); s.src = list[i];
+    s.onload = function () { plain(list, i + 1); };
+    s.onerror = function () { fail(list[i] + ' を読み込めませんでした。'); };
     document.body.appendChild(s);
   }
-  if (location.protocol === 'file:' || !window.fetch) { plain(0); return; }
+  if (location.protocol === 'file:' || !window.fetch) { plain(files, 0); return; }
+  var get = function (f, type) { return fetch(f, { cache: 'no-cache' }).then(function (r) { if (!r.ok) throw new Error(f + ' ' + r.status); return type === 'json' ? r.json() : r.text(); }); };
+  var opt = function (p) { return p.catch(function () { return null; }); };
+  // 分割出力の案内データ（data/manifest.json と、そこに書かれたファイル）
+  var split = opt(get('data/manifest.json', 'json')).then(function (m) {
+    if (!m || !Array.isArray(m.files)) return null;
+    return Promise.all(m.files.map(function (f) { return get('data/' + f.path, 'json'); })).then(function (arr) {
+      var map = {}; m.files.forEach(function (f, i) { map[f.path] = arr[i]; });
+      return { manifest: m, files: map };
+    });
+  });
   // 遅れやすい地点（delays.txt）は任意。読めなくてもアプリは動きます
-  var delays = fetch('delays.txt', { cache: 'no-cache' }).then(function (r) { return r.ok ? r.text() : null; }).catch(function () { return null; });
-  Promise.all(files.map(function (f) {
-    return fetch(f, { cache: 'no-cache' }).then(function (r) { if (!r.ok) throw new Error(f + ' ' + r.status); return r.text(); });
-  }).concat([delays])).then(function (texts) {
-    var dt = texts.pop(); if (dt != null) window.DELAY_TEXT = dt;
-    texts.forEach(function (text, i) { var s = document.createElement('script'); s.text = text + '\n//# sourceURL=' + files[i]; document.body.appendChild(s); });
-  }).catch(function (e) { console.warn('通常の方法で読み込みます', e); plain(0); });
+  var delays = opt(get('delays.txt', 'text'));
+  Promise.all([split, delays]).then(function (r) {
+    if (r[0]) window.BUS_GUIDE_SPLIT = r[0];
+    if (r[1] != null) window.DELAY_TEXT = r[1];
+    var list = r[0] ? files.filter(function (f) { return f !== 'data.js'; }) : files;
+    return Promise.all(list.map(function (f) { return get(f, 'text'); })).then(function (texts) {
+      texts.forEach(function (text, i) { var s = document.createElement('script'); s.text = text + '\n//# sourceURL=' + list[i]; document.body.appendChild(s); });
+    });
+  }).catch(function (e) { console.warn('通常の方法で読み込みます', e); plain(files, 0); });
 })();
 </script>
 </body>

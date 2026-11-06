@@ -3,7 +3,7 @@
  * 事業者向け: 車両 / 乗務員（担当車）/ 運用表 / 臨時便 / 設定
  */
 'use strict';
-const APP_VERSION = '2026-11-01.2';
+const APP_VERSION = '2026-11-06';
 
 /* ================= utilities ================= */
 const $ = (s, r = document) => r.querySelector(s);
@@ -2388,8 +2388,9 @@ function admSettings() {
       <p class="small muted" style="margin:0">車両・乗務員・運用・臨時便・設定は、このブラウザ内に保存されています。公開サイトの閲覧者にも同じデータを見せるには、「公開用 fleet.js を書き出す」で作ったファイルをリポジトリの fleet.js と置き換えてください。</p>
       <div class="row"><button class="btn" id="exJson">バックアップを書き出す（JSON）</button><button class="btn" id="imJson">バックアップを読み込む</button><button class="btn primary" id="exFleet">公開用 fleet.js を書き出す</button></div>
       <h3 style="font-size:15px;margin-top:8px">案内データ（路線・時刻表）</h3>
-      <p class="small muted" style="margin:0">現在のデータ：${esc(G.D.project || '')}（${esc((G.D.generatedAt || '').slice(0, 10))} 作成、停留所 ${G.D.stops.length}・系統 ${G.D.systems.length}・便 ${G.D.trips.length}）${LS.get('guideOverride', null) ? '　<b>このブラウザで差し替え中</b>' : ''}</p>
-      <div class="row"><button class="btn" id="imGuide">案内データを差し替える（JSON）</button>${LS.get('guideOverride', null) ? '<button class="btn" id="rsGuide">元の案内データに戻す</button>' : ''}</div>
+      <p class="small muted" style="margin:0">現在のデータ：${esc(G.D.project || '')}（${esc((G.D.generatedAt || '').slice(0, 10))} 作成、停留所 ${G.D.stops.length}・系統 ${G.D.systems.length}・便 ${G.D.trips.length}）　読み込み元：<b>${{ override: 'このブラウザで差し替えたデータ', split: '分割出力（data フォルダ）', datajs: 'data.js' }[state.guideSource] || ''}</b></p>
+      <div class="row"><button class="btn" id="imGuide">案内データを差し替える（JSON／ZIP）</button><button class="btn" id="imGuideDir">分割出力のフォルダを選んで差し替える</button>${state.guideSource === 'override' ? '<button class="btn" id="rsGuide">元の案内データに戻す</button>' : ''}<button class="btn" id="exDataJs">data.js として書き出す</button></div>
+      <p class="small muted" style="margin:0">分割出力は、ZIP のまま選ぶか、展開したフォルダを選んでください。差し替えはこのブラウザだけに反映されます。公開サイトでは、分割出力の中身をリポジトリの <code>data</code> フォルダに置くと、そちらが使われます。</p>
       <h3 style="font-size:15px;margin-top:8px">初期化</h3>
       <div class="row"><button class="btn danger" id="rsAll">車両・乗務員・運用・臨時便・設定をすべて初期状態に戻す</button></div>
     </div>`;
@@ -2458,19 +2459,91 @@ function admSettings() {
       LS.set('fleet', state.fleet); LS.set('temps', state.temps); LS.set('settings', state.settings); bump(); toast('バックアップを読み込みました'); admSettings();
     } catch { toast('読み込めませんでした。このアプリで書き出したJSONを選んでください'); }
   };
-  $('#imGuide').onclick = async () => {
-    const txt = await readFile('.json,application/json'); if (!txt) return;
+  const pickFiles = (opt) => new Promise((res) => {
+    const i = document.createElement('input'); i.type = 'file'; if (opt.dir) { i.webkitdirectory = true; i.multiple = true; } else i.accept = '.json,.zip,application/json,application/zip';
+    i.onchange = () => res(i.files); i.click();
+  });
+  const importGuide = async (opt) => {
+    const fl = await pickFiles(opt); if (!fl || !fl.length) return;
     try {
-      const o = JSON.parse(txt); if (o.format !== 'busplan-guide' || !Array.isArray(o.trips)) throw new Error();
-      if (!LS.set('guideOverride', o)) return;
-      toast('案内データを差し替えました。再読み込みします'); setTimeout(() => location.reload(), 800);
-    } catch { toast('読み込めませんでした。busplan-guide 形式の案内用データを選んでください'); }
+      toast('読み込んでいます…');
+      const o = await guideFromFiles(fl);
+      await IDB.set('guideOverride', o); LS.del('guideOverride');
+      toast(`案内データを差し替えました（停留所${o.stops.length}・便${o.trips.length}）。再読み込みします`); setTimeout(() => location.reload(), 900);
+    } catch (e) { toast(`読み込めませんでした：${e.message || '形式を確認してください'}`); }
   };
-  const rg = $('#rsGuide'); if (rg) rg.onclick = () => { LS.del('guideOverride'); location.reload(); };
+  $('#imGuide').onclick = () => importGuide({});
+  $('#imGuideDir').onclick = () => importGuide({ dir: true });
+  $('#exDataJs').onclick = () => { const o = { ...G.D }; delete o.source; download('data.js', `/* ${o.project || ''} 案内用データ（busplan-guide 形式）。ローカルで index.html を直接開くときに使います。 */\nwindow.BUS_GUIDE_DATA = ${JSON.stringify(o)};\n`, 'text/javascript'); };
+  const rg = $('#rsGuide'); if (rg) rg.onclick = async () => { LS.del('guideOverride'); await IDB.del('guideOverride'); location.reload(); };
   $('#rsAll').onclick = async () => {
     if (!(await confirmBox('このブラウザに保存した車両・乗務員・運用・臨時便・設定・読み込んだCSV・変更したパスワードをすべて消して、初期状態に戻します。', '初期状態に戻す'))) return;
     ['fleet', 'temps', 'settings', 'pwHash', 'plateCsv', 'modelCsv'].forEach(LS.del); location.reload();
   };
+}
+
+/* ================= 案内データの読み込み（1ファイル形式・分割出力形式） ================= */
+/* 分割出力（manifest.json＋各ファイル）を、1ファイル形式と同じ形にまとめる */
+function assembleSplit(manifest, files) {
+  const by = (kind) => manifest.files.filter((f) => f.kind === kind).map((f) => files[f.path]).filter((x) => x != null);
+  const flat = (arr) => arr.flatMap((x) => (Array.isArray(x) ? x : [x]));
+  const ft = by('fareTypes')[0];
+  return {
+    format: 'busplan-guide', version: manifest.version, generatedAt: manifest.generatedAt, project: manifest.project,
+    days: manifest.days, settings: manifest.settings, schema: manifest.schema,
+    stops: flat(by('stops')), routes: flat(by('routes')), systems: flat(by('systems')), trips: flat(by('trips')),
+    fares: { types: ft?.types ?? (Array.isArray(ft) ? ft : []), childRule: ft?.childRule, routes: flat(by('fareTable')) },
+    operations: { depots: flat(by('depots')), duties: flat(by('duties')) },
+    source: 'split',
+  };
+}
+/* 大きな案内データの差し替え先（localStorage には入りきらないため IndexedDB を使う） */
+const IDB = {
+  open() { return new Promise((res, rej) => { const r = indexedDB.open('ichika-bus', 1); r.onupgradeneeded = () => r.result.createObjectStore('kv'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); }); },
+  async get(k) { try { const db = await this.open(); return await new Promise((res) => { const q = db.transaction('kv').objectStore('kv').get(CFG.storagePrefix + k); q.onsuccess = () => res(q.result ?? null); q.onerror = () => res(null); }); } catch { return null; } },
+  async set(k, v) { const db = await this.open(); return new Promise((res, rej) => { const tx = db.transaction('kv', 'readwrite'); tx.objectStore('kv').put(v, CFG.storagePrefix + k); tx.oncomplete = () => res(true); tx.onerror = () => rej(tx.error); }); },
+  async del(k) { try { const db = await this.open(); await new Promise((res) => { const tx = db.transaction('kv', 'readwrite'); tx.objectStore('kv').delete(CFG.storagePrefix + k); tx.oncomplete = res; tx.onerror = res; }); } catch { /* noop */ } },
+};
+/* ZIP の読み取り（無圧縮と deflate に対応。ブラウザの DecompressionStream を使う） */
+async function readZip(buf) {
+  const dv = new DataView(buf); let eocd = -1;
+  for (let i = buf.byteLength - 22; i >= Math.max(0, buf.byteLength - 65557); i--) if (dv.getUint32(i, true) === 0x06054b50) { eocd = i; break; }
+  if (eocd < 0) throw new Error('ZIP ファイルではありません');
+  const n = dv.getUint16(eocd + 10, true); let p = dv.getUint32(eocd + 16, true); const out = {};
+  const dec = new TextDecoder();
+  for (let k = 0; k < n; k++) {
+    if (dv.getUint32(p, true) !== 0x02014b50) throw new Error('ZIP の形式が正しくありません');
+    const method = dv.getUint16(p + 10, true), csize = dv.getUint32(p + 20, true), nl = dv.getUint16(p + 28, true), xl = dv.getUint16(p + 30, true), cl = dv.getUint16(p + 32, true), lo = dv.getUint32(p + 42, true);
+    const name = dec.decode(new Uint8Array(buf, p + 46, nl)); p += 46 + nl + xl + cl;
+    if (name.endsWith('/')) continue;
+    const start = lo + 30 + dv.getUint16(lo + 26, true) + dv.getUint16(lo + 28, true);
+    const raw = new Uint8Array(buf, start, csize);
+    let bytes;
+    if (method === 0) bytes = raw;
+    else if (method === 8) bytes = new Uint8Array(await new Response(new Blob([raw]).stream().pipeThrough(new DecompressionStream('deflate-raw'))).arrayBuffer());
+    else throw new Error(`対応していない圧縮方式です（${name}）`);
+    out[name.replace(/\\/g, '/')] = dec.decode(bytes);
+  }
+  return out;
+}
+/* 選んだファイル（JSON 1つ・ZIP・フォルダ内のファイル一式）から案内データを作る */
+async function guideFromFiles(fileList) {
+  const list = [...fileList]; if (!list.length) throw new Error('ファイルが選ばれていません');
+  let texts = {};
+  if (list.length === 1 && /\.zip$/i.test(list[0].name)) texts = await readZip(await list[0].arrayBuffer());
+  else for (const f of list) texts[(f.webkitRelativePath || f.name).replace(/\\/g, '/')] = await f.text();
+  const paths = Object.keys(texts);
+  const mf = paths.filter((x) => /(^|\/)manifest\.json$/.test(x)).sort((a, b) => a.length - b.length)[0];
+  if (mf) {
+    const base = mf.slice(0, mf.length - 'manifest.json'.length); const manifest = JSON.parse(texts[mf]);
+    if (!Array.isArray(manifest.files)) throw new Error('manifest.json に files がありません');
+    const files = {}; const missing = [];
+    for (const f of manifest.files) { const t = texts[base + f.path]; if (t == null) missing.push(f.path); else files[f.path] = JSON.parse(t); }
+    if (missing.length) throw new Error(`足りないファイルがあります：${missing.slice(0, 3).join('、')}${missing.length > 3 ? ` ほか${missing.length - 3}件` : ''}`);
+    return assembleSplit(manifest, files);
+  }
+  const js = paths.find((x) => /\.json$/i.test(x)); if (!js) throw new Error('JSON ファイルが見つかりません');
+  const o = JSON.parse(texts[js]); if (!Array.isArray(o.trips)) throw new Error('案内用データの形式ではありません'); return o;
 }
 
 /* ================= router & boot ================= */
@@ -2484,10 +2557,15 @@ function route() {
   v(parts.slice(1));
   window.scrollTo(0, 0);
 }
-function boot() {
-  const override = LS.get('guideOverride', null);
-  const D = override || window.BUS_GUIDE_DATA;
-  if (!D || !Array.isArray(D.trips)) { app().innerHTML = '<div class="panel empty">案内データ（data.js）を読み込めませんでした。</div>'; return; }
+async function boot() {
+  // 案内データ：このブラウザで差し替えたデータ → 分割出力（data フォルダ） → data.js の順に使う
+  let override = await IDB.get('guideOverride');
+  if (!override) { const old = LS.get('guideOverride', null); if (old) override = old; }
+  state.guideSource = override ? 'override' : window.BUS_GUIDE_SPLIT ? 'split' : 'datajs';
+  let D = override || null;
+  if (!D && window.BUS_GUIDE_SPLIT) { try { D = assembleSplit(window.BUS_GUIDE_SPLIT.manifest, window.BUS_GUIDE_SPLIT.files); } catch (e) { console.warn(e); } }
+  D ||= window.BUS_GUIDE_DATA;
+  if (!D || !Array.isArray(D.trips)) { app().innerHTML = '<div class="panel empty">案内データ（data フォルダまたは data.js）を読み込めませんでした。</div>'; return; }
   buildIndex(D);
   loadRefData();
   if (D.project) { CFG.companyName = D.project; $('#brandName').textContent = D.project; document.title = `${D.project} バス案内`; $('.disc').textContent = D.project.slice(0, 1); }
