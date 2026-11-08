@@ -3,7 +3,7 @@
  * 事業者向け: 車両 / 乗務員（担当車）/ 運用表 / 臨時便 / 設定
  */
 'use strict';
-const APP_VERSION = '2026-11-06';
+const APP_VERSION = '2026-11-08';
 
 /* ================= utilities ================= */
 const $ = (s, r = document) => r.querySelector(s);
@@ -2485,15 +2485,18 @@ function admSettings() {
 /* ================= 案内データの読み込み（1ファイル形式・分割出力形式） ================= */
 /* 分割出力（manifest.json＋各ファイル）を、1ファイル形式と同じ形にまとめる */
 function assembleSplit(manifest, files) {
-  const by = (kind) => manifest.files.filter((f) => f.kind === kind).map((f) => files[f.path]).filter((x) => x != null);
-  const flat = (arr) => arr.flatMap((x) => (Array.isArray(x) ? x : [x]));
+  // 種類名のゆれ（単数／複数、分割ファイル）に対応：fareTable と fareTables、trips の分割（part1.json …）など
+  const kindKey = (k) => String(k || '').toLowerCase().replace(/[^a-z]/g, '').replace(/ies$/, 'y').replace(/s$/, '');
+  const by = (kind) => manifest.files.filter((f) => kindKey(f.kind) === kindKey(kind)).map((f) => files[f.path]).filter((x) => x != null);
+  const flat = (arr) => arr.flatMap((x) => (Array.isArray(x) ? x : x && typeof x === 'object' && Array.isArray(x.items) ? x.items : [x]));
+  const uniq = (arr) => { const seen = new Set(); return arr.filter((x) => !x?.id || (!seen.has(x.id) && seen.add(x.id))); };
   const ft = by('fareTypes')[0];
   return {
     format: 'busplan-guide', version: manifest.version, generatedAt: manifest.generatedAt, project: manifest.project,
     days: manifest.days, settings: manifest.settings, schema: manifest.schema,
-    stops: flat(by('stops')), routes: flat(by('routes')), systems: flat(by('systems')), trips: flat(by('trips')),
-    fares: { types: ft?.types ?? (Array.isArray(ft) ? ft : []), childRule: ft?.childRule, routes: flat(by('fareTable')) },
-    operations: { depots: flat(by('depots')), duties: flat(by('duties')) },
+    stops: uniq(flat(by('stops'))), routes: uniq(flat(by('routes'))), systems: uniq(flat(by('systems'))), trips: uniq(flat(by('trips'))),
+    fares: { types: ft?.types ?? (Array.isArray(ft) ? ft : []), childRule: ft?.childRule, routes: flat(by('fareTables')) },
+    operations: { depots: uniq(flat(by('depots'))), duties: uniq(flat(by('duties'))) },
     source: 'split',
   };
 }

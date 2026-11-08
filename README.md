@@ -123,7 +123,7 @@ GitHub Pages は公開の反映に1〜数分かかります。画面下の「ア
 
 ## 案内データの更新（分割出力）
 
-時刻表作成アプリの分割出力（ZIP）を展開し、中身（`manifest.json`、`stops.json`、`trips/` など）をリポジトリの `data` フォルダにそのまま置いてコミットします。`data/manifest.json` があれば、アプリはそこに書かれたファイルを読み込んで使います。
+時刻表作成アプリの分割出力（ZIP）を展開し、中身（`manifest.json`、`stops.json`、`trips/` など）をリポジトリの `data` フォルダにそのまま置いてコミットします。`data/manifest.json` があれば、アプリはそこに書かれたファイルを読み込んで使います。ファイルの分け方（路線ごと・part1.json のようなまとめ方など）が変わっても、`manifest.json` の `files` に書かれた種類（`stops`・`routes`・`systems`・`trips`・`fareTables`・`fareTypes`・`depots`・`duties`）をもとに読み込みます。
 
 ローカルで `index.html` を直接開いたときはブラウザの制限で `data` フォルダを読めないため、`data.js` を使います。`data.js` は、事業者用ページ → 設定 →「data.js として書き出す」で、いま表示している案内データから作れます。
 
