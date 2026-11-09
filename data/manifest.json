@@ -1,0 +1,737 @@
+{
+ "format": "busplan-guide-split",
+ "version": 2,
+ "generatedAt": "2026-11-09T06:58:29.432Z",
+ "project": "一花交通",
+ "days": {
+  "wd": "平日",
+  "we": "土日"
+ },
+ "settings": {
+  "timeAdjustMin": 1
+ },
+ "schema": {
+  "time": "時刻は0:00からの経過分（24時以降は1440以上）。trips[].times は系統の stops と同じ並びで [到着, 発車]、通過は null",
+  "fare": "fares.routes[].adult[i][j] は stops[i] から stops[j] まで乗ったときの大人運賃（円）。小児は大人の半額を10円未満切り上げ",
+  "direction": "down は路線の停車順どおり、up は逆向き",
+  "baseStop": "routes[].baseStop はその路線の運用基準停の停留所ID（未設定は null）。stops[].baseOfRoutes はその停留所を運用基準停にしている路線のID一覧",
+  "day": "ダイヤは1種類（wd）。土日は notOperating が weekend の便を除いたもの、平日は weekday の便を除いたもの",
+  "files": "files[] に各ファイルのパス・種類・対象（曜日・路線・営業所）・件数・バイト数。必要なファイルだけ読み込めます",
+  "trips": "種類 trips のファイルは便の配列。files[].routeIds にそのファイルに含まれる路線ID、files[].day に曜日",
+  "fareTables": "種類 fareTables のファイルは運賃表の配列（経路ごと）。files[].routes に含まれる路線・経路",
+  "duties": "種類 duties のファイルは運用の配列。files[].depotId または depotIds に営業所"
+ },
+ "files": [
+  {
+   "path": "stops.json",
+   "kind": "stops",
+   "count": 898,
+   "bytes": 169719
+  },
+  {
+   "path": "routes.json",
+   "kind": "routes",
+   "count": 50,
+   "bytes": 151557
+  },
+  {
+   "path": "systems.json",
+   "kind": "systems",
+   "count": 148,
+   "bytes": 481070
+  },
+  {
+   "path": "fares/types.json",
+   "kind": "fareTypes",
+   "bytes": 1052
+  },
+  {
+   "path": "operations/depots.json",
+   "kind": "depots",
+   "count": 8,
+   "bytes": 1730
+  },
+  {
+   "path": "fares/part1.json",
+   "kind": "fareTables",
+   "routes": [
+    {
+     "routeId": "rewc0uw",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rf0s0q8",
+     "lineId": "main"
+    },
+    {
+     "routeId": "r2zstej",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rkw1gl",
+     "lineId": "bvzl3w"
+    },
+    {
+     "routeId": "r1p4gdo",
+     "lineId": "b1p5aeq"
+    },
+    {
+     "routeId": "rajmcjw",
+     "lineId": "main"
+    },
+    {
+     "routeId": "r9ee0ae",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rg4zjr",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rgts8b",
+     "lineId": "bgu6dj"
+    },
+    {
+     "routeId": "rghz0vq",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rajwiig",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rf0kf9i",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rhuez0",
+     "lineId": "main"
+    }
+   ],
+   "count": 13,
+   "bytes": 234146
+  },
+  {
+   "path": "fares/part2.json",
+   "kind": "fareTables",
+   "routes": [
+    {
+     "routeId": "r9gw9t6",
+     "lineId": "b9gxs96"
+    },
+    {
+     "routeId": "r7geev1",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rbp5az",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rg17xw8",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rhti4l",
+     "lineId": "main"
+    },
+    {
+     "routeId": "r9ecrfp",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rkvhvp",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rgvdlk",
+     "lineId": "bgwfwo"
+    },
+    {
+     "routeId": "r2zrkva",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rajer5w",
+     "lineId": "main"
+    },
+    {
+     "routeId": "r3a19y8",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rffy84",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rf6f2lw",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rh6ueyc",
+     "lineId": "main"
+    }
+   ],
+   "count": 14,
+   "bytes": 231199
+  },
+  {
+   "path": "fares/part3.json",
+   "kind": "fareTables",
+   "routes": [
+    {
+     "routeId": "r9gt26a",
+     "lineId": "main"
+    },
+    {
+     "routeId": "r9gt26a",
+     "lineId": "b9guozi"
+    },
+    {
+     "routeId": "r7gfue1",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rajrosa",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rfyqufo",
+     "lineId": "main"
+    },
+    {
+     "routeId": "r9ee0ae",
+     "lineId": "b9efzuo"
+    },
+    {
+     "routeId": "rajlqc0",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rg393n",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rfzn9aw",
+     "lineId": "main"
+    },
+    {
+     "routeId": "r9egge1",
+     "lineId": "b9eh6jw"
+    },
+    {
+     "routeId": "r1559o",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rg06mkz",
+     "lineId": "bg07yxr"
+    }
+   ],
+   "count": 12,
+   "bytes": 232380
+  },
+  {
+   "path": "fares/part4.json",
+   "kind": "fareTables",
+   "routes": [
+    {
+     "routeId": "rg71318",
+     "lineId": "main"
+    },
+    {
+     "routeId": "r64g1gk",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rf0hd1t",
+     "lineId": "main"
+    },
+    {
+     "routeId": "reyef83",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rkvhvp",
+     "lineId": "bvyeed"
+    },
+    {
+     "routeId": "r9edr81",
+     "lineId": "main"
+    },
+    {
+     "routeId": "r1p4gdo",
+     "lineId": "main"
+    },
+    {
+     "routeId": "r9egge1",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rbqwp7",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rghz0vq",
+     "lineId": "bgi0ghe"
+    },
+    {
+     "routeId": "rc84qa4",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rf0le71",
+     "lineId": "main"
+    }
+   ],
+   "count": 12,
+   "bytes": 235549
+  },
+  {
+   "path": "fares/part5.json",
+   "kind": "fareTables",
+   "routes": [
+    {
+     "routeId": "rbrhph",
+     "lineId": "main"
+    },
+    {
+     "routeId": "r9gw9t6",
+     "lineId": "main"
+    },
+    {
+     "routeId": "r9grinf",
+     "lineId": "main"
+    },
+    {
+     "routeId": "r9grinf",
+     "lineId": "b9gs0iq"
+    },
+    {
+     "routeId": "rg726nz",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rkw1gl",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rgvdlk",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rg06mkz",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rgts8b",
+     "lineId": "main"
+    },
+    {
+     "routeId": "rc83kf6",
+     "lineId": "main"
+    },
+    {
+     "routeId": "r1559o",
+     "lineId": "b16zml"
+    },
+    {
+     "routeId": "roiv3",
+     "lineId": "main"
+    }
+   ],
+   "count": 12,
+   "bytes": 232071
+  },
+  {
+   "path": "operations/duties_dg6as35_wd.json",
+   "kind": "duties",
+   "day": "wd",
+   "depotId": "dg6as35",
+   "count": 19,
+   "bytes": 52729
+  },
+  {
+   "path": "operations/duties_dajdd3m_wd.json",
+   "kind": "duties",
+   "day": "wd",
+   "depotId": "dajdd3m",
+   "count": 30,
+   "bytes": 77999
+  },
+  {
+   "path": "operations/duties_dnccs_wd.json",
+   "kind": "duties",
+   "day": "wd",
+   "depotId": "dnccs",
+   "count": 191,
+   "bytes": 495526
+  },
+  {
+   "path": "operations/duties_dewbdbl_wd.json",
+   "kind": "duties",
+   "day": "wd",
+   "depotId": "dewbdbl",
+   "count": 102,
+   "bytes": 259151
+  },
+  {
+   "path": "operations/duties_dfa70_wd.json",
+   "kind": "duties",
+   "day": "wd",
+   "depotId": "dfa70",
+   "count": 142,
+   "bytes": 376621
+  },
+  {
+   "path": "operations/duties_dg1i6zf_wd.json",
+   "kind": "duties",
+   "day": "wd",
+   "depotId": "dg1i6zf",
+   "count": 10,
+   "bytes": 18052
+  },
+  {
+   "path": "trips/wd/part1.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "r1559o"
+   ],
+   "count": 579,
+   "bytes": 309901
+  },
+  {
+   "path": "trips/wd/part2.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rg393n"
+   ],
+   "count": 412,
+   "bytes": 271538
+  },
+  {
+   "path": "trips/wd/part3.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rhuez0"
+   ],
+   "count": 266,
+   "bytes": 101008
+  },
+  {
+   "path": "trips/wd/part4.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "r64g1gk"
+   ],
+   "count": 240,
+   "bytes": 232951
+  },
+  {
+   "path": "trips/wd/part5.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "reyef83"
+   ],
+   "count": 198,
+   "bytes": 160963
+  },
+  {
+   "path": "trips/wd/part6.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rajlqc0"
+   ],
+   "count": 164,
+   "bytes": 106437
+  },
+  {
+   "path": "trips/wd/part7.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rf0le71"
+   ],
+   "count": 156,
+   "bytes": 80133
+  },
+  {
+   "path": "trips/wd/part8.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rf0s0q8"
+   ],
+   "count": 156,
+   "bytes": 138263
+  },
+  {
+   "path": "trips/wd/part9.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rf6f2lw"
+   ],
+   "count": 154,
+   "bytes": 44219
+  },
+  {
+   "path": "trips/wd/part10.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rbp5az"
+   ],
+   "count": 143,
+   "bytes": 124477
+  },
+  {
+   "path": "trips/wd/part11.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rg4zjr"
+   ],
+   "count": 122,
+   "bytes": 81963
+  },
+  {
+   "path": "trips/wd/part12.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "roiv3"
+   ],
+   "count": 116,
+   "bytes": 46174
+  },
+  {
+   "path": "trips/wd/part13.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rbqwp7"
+   ],
+   "count": 104,
+   "bytes": 67184
+  },
+  {
+   "path": "trips/wd/part14.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "r2zrkva"
+   ],
+   "count": 96,
+   "bytes": 63663
+  },
+  {
+   "path": "trips/wd/part15.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "r9ee0ae"
+   ],
+   "count": 96,
+   "bytes": 64898
+  },
+  {
+   "path": "trips/wd/part16.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rkvhvp"
+   ],
+   "count": 76,
+   "bytes": 54704
+  },
+  {
+   "path": "trips/wd/part17.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rh6ueyc"
+   ],
+   "count": 75,
+   "bytes": 21166
+  },
+  {
+   "path": "trips/wd/part18.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rg726nz"
+   ],
+   "count": 74,
+   "bytes": 56979
+  },
+  {
+   "path": "trips/wd/part19.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rhti4l"
+   ],
+   "count": 72,
+   "bytes": 51596
+  },
+  {
+   "path": "trips/wd/part20.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rkw1gl"
+   ],
+   "count": 72,
+   "bytes": 53417
+  },
+  {
+   "path": "trips/wd/part21.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rgts8b"
+   ],
+   "count": 64,
+   "bytes": 41565
+  },
+  {
+   "path": "trips/wd/part22.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rffy84"
+   ],
+   "count": 54,
+   "bytes": 22146
+  },
+  {
+   "path": "trips/wd/part23.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rf0kf9i"
+   ],
+   "count": 47,
+   "bytes": 19162
+  },
+  {
+   "path": "trips/wd/part24.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rgvdlk",
+    "rajwiig"
+   ],
+   "count": 46,
+   "bytes": 30420
+  },
+  {
+   "path": "trips/wd/part25.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "r9edr81",
+    "r9ecrfp",
+    "r9egge1"
+   ],
+   "count": 48,
+   "bytes": 33743
+  },
+  {
+   "path": "trips/wd/part26.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rbrhph",
+    "rc84qa4"
+   ],
+   "count": 46,
+   "bytes": 39422
+  },
+  {
+   "path": "trips/wd/part27.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rg17xw8",
+    "r7geev1",
+    "rewc0uw"
+   ],
+   "count": 50,
+   "bytes": 43671
+  },
+  {
+   "path": "trips/wd/part28.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "r9gt26a",
+    "r2zstej"
+   ],
+   "count": 46,
+   "bytes": 45199
+  },
+  {
+   "path": "trips/wd/part29.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rfyqufo",
+    "r7gfue1"
+   ],
+   "count": 44,
+   "bytes": 34299
+  },
+  {
+   "path": "trips/wd/part30.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rghz0vq",
+    "r9grinf"
+   ],
+   "count": 44,
+   "bytes": 28401
+  },
+  {
+   "path": "trips/wd/part31.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rajmcjw",
+    "rajer5w"
+   ],
+   "count": 47,
+   "bytes": 30012
+  },
+  {
+   "path": "trips/wd/part32.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "r1p4gdo",
+    "r3a19y8"
+   ],
+   "count": 50,
+   "bytes": 31589
+  },
+  {
+   "path": "trips/wd/part33.json",
+   "kind": "trips",
+   "day": "wd",
+   "routeIds": [
+    "rajrosa",
+    "rg06mkz"
+   ],
+   "count": 49,
+   "bytes": 31916
+  }
+ ]
+}
