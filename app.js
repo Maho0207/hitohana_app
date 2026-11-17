@@ -3,7 +3,7 @@
  * 事業者向け: 車両 / 乗務員（担当車）/ 運用表 / 臨時便 / 設定
  */
 'use strict';
-const APP_VERSION = '2026-11-09';
+const APP_VERSION = '2026-11-18';
 
 /* ================= utilities ================= */
 const $ = (s, r = document) => r.querySelector(s);
@@ -1085,7 +1085,7 @@ function loadFleet() {
   const saved = LS.get('fleet', null);
   if (saved && Array.isArray(saved.vehicles)) state.fleet = saved;
   else if (pub && Array.isArray(pub.vehicles)) {
-    state.fleet = { vehicles: pub.vehicles, drivers: pub.drivers || [], duties: Array.isArray(pub.duties) ? pub.duties : undefined, dutySrc: pub.dutySrc };
+    state.fleet = { vehicles: pub.vehicles, drivers: pub.drivers || [], duties: Array.isArray(pub.duties) ? pub.duties : undefined, dutySrc: pub.dutySrc, transfers: pub.transfers || [] };
     if (!LS.get('temps', null) && Array.isArray(pub.temps)) state.temps = pub.temps;
     if (!LS.get('settings', null) && pub.settings) { LS.set('settings', pub.settings); state.settings = loadSettings(); LS.del('settings'); }
   } else defaultFleet();
@@ -1821,7 +1821,7 @@ function admVehicles() {
       <label class="field" style="width:220px"><span>所属</span><select id="vDep">${depotOptions(av.depot, '<option value="all">すべて</option>')}</select></label>
     </div>
     <div class="row" style="margin-bottom:12px">
-      <button class="btn primary" id="vTpl">テンプレートから登録</button><button class="btn" id="vAdd">個別に追加</button><button class="btn" id="vRand">ランダムに追加</button><button class="btn" id="vRenum">ナンバーを付け直す</button><button class="btn" id="vCsv">CSVで書き出す</button>
+      <button class="btn primary" id="vTpl">テンプレートから登録</button><button class="btn" id="vAdd">個別に追加</button><button class="btn" id="vRand">ランダムに追加</button><button class="btn" id="vRenum">ナンバーを付け直す</button><button class="btn" id="vTr">ランダムに転属</button><button class="btn" id="vTrH">転属履歴</button><button class="btn" id="vCsv">CSVで書き出す</button>
     </div>
     <div id="vTable"></div>`;
   $('#vDep').value = av.depot;
@@ -1831,6 +1831,8 @@ function admVehicles() {
   $('#vRand').onclick = randomVehicles;
   $('#vTpl').onclick = templateVehicles;
   $('#vRenum').onclick = renumberPlates;
+  $('#vTr').onclick = () => transferDialog(() => { if ($('#vTable')) admVehicles(); });
+  $('#vTrH').onclick = transferHistory;
   $('#vCsv').onclick = () => download('vehicles.csv', '\ufeff' + [csvLine(['車番', '登録番号', 'メーカー', '車種', '大きさ', '年式', '所属', '定員', '設備', '状態', '担当乗務員', '備考']), ...state.fleet.vehicles.map((v) => csvLine([v.no, v.plate, v.maker, v.model, v.type, v.year, depotName(v.depot), v.capacity, v.floor, v.status, driversOfVehicleAll(v.id).map(driverName).join(' / '), v.note]))].join('\n'), 'text/csv');
   drawVehicles();
 }
@@ -1951,6 +1953,87 @@ function randomVehicles() {
   };
 }
 
+/* ---- 転属（車両・乗務員を別の営業所へ。車番・登録番号・社員番号はそのまま） ---- */
+function depotsWithDuties() {
+  const per = {}; let ds = serviceNow(true).date;
+  for (let i = 0; i < 7; i++, ds = addDays(ds, 1)) { const bf = blocksFor(ds); for (const d of G.depots) per[d.id] = Math.max(per[d.id] || 0, bf.perDepot[d.id] || 0); }
+  return new Set(G.depots.filter((d) => per[d.id] > 0).map((d) => d.id));
+}
+function shuffle(arr, rng = Math.random) { const a = arr.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(rng() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; }
+/* 指定した数の車両・乗務員をランダムに転属させる */
+function randomTransfer(opt, rng = Math.random) {
+  const f = state.fleet; const log = []; const at = new Date().toISOString();
+  const withOps = depotsWithDuties();
+  const dests = (from) => G.depots.filter((d) => d.id !== from && (opt.to === 'all' || (opt.to === 'ops' ? withOps.has(d.id) : d.id === opt.to))).map((d) => d.id);
+  const fromOk = (dep) => opt.from === 'all' || dep === opt.from;
+  const moved = new Set();
+  // 車両
+  const vs = shuffle(f.vehicles.filter((v) => fromOk(v.depot) && dests(v.depot).length), rng).slice(0, opt.nv);
+  for (const v of vs) {
+    const ds = dests(v.depot); const to = ds[Math.floor(rng() * ds.length)]; const from = v.depot;
+    const crew = f.drivers.filter((d) => d.vehicleId === v.id);
+    v.depot = to;
+    const went = []; const vlog = { at, kind: 'vehicle', id: v.id, label: v.no, from, to, note: '' }; log.push(vlog);
+    for (const d of crew) {
+      if (opt.crew === 'with' && d.depot === from) { d.depot = to; moved.add(d.id); went.push(driverName(d)); log.push({ at, kind: 'driver', id: d.id, label: `${driverName(d)}（${d.empNo}）`, from, to, note: `担当車 ${v.no} と一緒に` }); }
+      else d.vehicleId = null;
+    }
+    vlog.note = (opt.crew === 'with' ? (went.length ? `担当 ${went.join('・')} も転属` : '担当なし') : (crew.length ? `担当 ${crew.map(driverName).join('・')} は担当を外れて残留` : '担当なし'));
+  }
+  // 乗務員
+  const ds2 = shuffle(f.drivers.filter((d) => !moved.has(d.id) && d.status !== '休職' && fromOk(d.depot) && dests(d.depot).length), rng).slice(0, opt.nd);
+  for (const d of ds2) {
+    const ds = dests(d.depot); const to = ds[Math.floor(rng() * ds.length)]; const from = d.depot;
+    const veh = f.vehicles.find((v) => v.id === d.vehicleId);
+    d.depot = to; if (veh && veh.depot !== to) d.vehicleId = null;
+    log.push({ at, kind: 'driver', id: d.id, label: `${driverName(d)}（${d.empNo}）`, from, to, note: veh ? `担当車 ${veh.no} の担当を外れる` : '' });
+  }
+  let assigned = 0;
+  if (opt.assign) { caches.blocks.clear(); assigned = autoAssign(); }
+  f.transfers = (f.transfers || []).concat(log).slice(-1000);
+  return { log, assigned, nv: vs.length, nd: ds2.length };
+}
+function transferTable(log) {
+  return `<div class="tablewrap" style="max-height:340px;overflow:auto"><table class="data"><thead><tr><th>種類</th><th>車番・氏名</th><th>転出元</th><th></th><th>転入先</th><th>備考</th></tr></thead><tbody>${log.map((x) => `<tr><td>${x.kind === 'vehicle' ? '車両' : '乗務員'}</td><td><b>${esc(x.label)}</b></td><td>${esc(depotShort(x.from))}</td><td>→</td><td>${esc(depotShort(x.to))}</td><td class="small muted" style="white-space:normal">${esc(x.note || '')}</td></tr>`).join('')}</tbody></table></div>`;
+}
+function transferDialog(after) {
+  const withOps = depotsWithDuties();
+  const d = modal('ランダムに転属', `<form class="stack" id="trf">
+    <div class="grid2">
+      <label class="field"><span>転属する車両（台）</span><input type="number" name="nv" value="5" min="0" max="1000"></label>
+      <label class="field"><span>転属する乗務員（人）</span><input type="number" name="nd" value="5" min="0" max="3000"></label>
+      <label class="field"><span>転出元</span><select name="from">${depotOptions('', '<option value="all" selected>すべての営業所</option>')}</select></label>
+      <label class="field"><span>転入先</span><select name="to"><option value="ops" selected>ランダム（運用のある営業所）</option><option value="all">ランダム（すべての営業所）</option>${G.depots.map((x) => `<option value="${esc(x.id)}">${esc(x.name)}${withOps.has(x.id) ? '' : '（運用なし）'}</option>`).join('')}</select></label>
+    </div>
+    <fieldset style="border:1px solid var(--line);border-radius:8px;padding:10px 12px"><legend class="small" style="font-weight:700">転属する車両の担当乗務員</legend>
+      <label style="display:flex;gap:8px;align-items:center"><input type="radio" name="crew" value="with" checked> 車両と一緒に転属する（担当はそのまま）</label>
+      <label style="display:flex;gap:8px;align-items:center"><input type="radio" name="crew" value="stay"> 元の営業所に残る（担当を外れる）</label>
+    </fieldset>
+    <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="assign" checked> 転属のあと、担当車のない乗務員に同じ営業所の車両を割り当てる</label>
+    <p class="note">乗務員の人数は、車両と一緒に移る担当者とは別に数えます。車番・登録番号・社員番号は変わりません。乗務員だけが転属して担当車と所属が分かれた場合は、担当を外します。転属の記録は「転属履歴」で確認できます。</p>
+    <div id="trOut"></div></form>`, { wide: true, foot: '<button class="btn" data-close>閉じる</button><button class="btn primary" id="trGo">転属する</button>' });
+  $('#trGo', d).onclick = () => {
+    const f = $('#trf', d);
+    const opt = { nv: clamp(Math.round(+f.nv.value || 0), 0, 1000), nd: clamp(Math.round(+f.nd.value || 0), 0, 3000), from: f.from.value, to: f.to.value, crew: f.crew.value, assign: f.assign.checked };
+    if (!opt.nv && !opt.nd) { toast('台数か人数を入力してください'); return; }
+    if (opt.to !== 'ops' && opt.to !== 'all' && opt.from === opt.to) { toast('転出元と転入先が同じです'); return; }
+    const r = randomTransfer(opt); saveFleet();
+    const short = [];
+    if (r.nv < opt.nv) short.push(`車両は転属できる車両が${r.nv}台だけでした`);
+    if (r.nd < opt.nd) short.push(`乗務員は転属できる人が${r.nd}人だけでした`);
+    $('#trOut', d).innerHTML = `<p style="margin:0 0 6px"><b>車両${r.nv}台・乗務員${r.log.filter((x) => x.kind === 'driver').length}人を転属しました。</b>${opt.assign ? `担当車を${r.assigned}人に割り当てました。` : ''}</p>${short.length ? `<p class="small" style="color:var(--warn);margin:0 0 6px">${short.join('。')}。</p>` : ''}${transferTable(r.log)}`;
+    $('#trGo', d).textContent = 'もう一度転属する';
+    toast('転属しました'); after && after();
+  };
+}
+function transferHistory() {
+  const log = (state.fleet.transfers || []).slice().reverse();
+  const groups = new Map(); for (const x of log) { if (!groups.has(x.at)) groups.set(x.at, []); groups.get(x.at).push(x); }
+  const body = log.length ? [...groups.entries()].map(([at, xs]) => { const dt = new Date(at); return `<h3 style="font-size:14px;margin:12px 0 6px">${dateJa(dateStr(dt))} ${pad2(dt.getHours())}:${pad2(dt.getMinutes())}　車両${xs.filter((x) => x.kind === 'vehicle').length}台・乗務員${xs.filter((x) => x.kind === 'driver').length}人</h3>${transferTable(xs)}`; }).join('') : '<div class="empty">まだ転属の記録はありません。</div>';
+  const d = modal('転属履歴', body, { wide: true, foot: `${log.length ? '<button class="btn danger" id="thClear" style="margin-right:auto">履歴を消す</button>' : ''}<button class="btn" data-close>閉じる</button>` });
+  const c = $('#thClear', d); if (c) c.onclick = () => { state.fleet.transfers = []; saveFleet(); d.close(); toast('転属履歴を消しました'); };
+}
+
 /* ---- ナンバーの検査・テンプレート登録・付け直し ---- */
 function plateStatus(v, dupKeys) {
   if (!v.plate) return 'empty';
@@ -2069,7 +2152,7 @@ function admDrivers() {
       <label class="field" style="width:100px"><span>性別</span><select id="dGen"><option value="all">すべて</option><option>男</option><option>女</option></select></label>
     </div>
     <div class="row" style="margin-bottom:12px">
-      <button class="btn primary" id="dAdd">乗務員を追加</button><button class="btn" id="dRand">ランダムに登録</button><button class="btn" id="dAuto">担当車を自動で割り当て</button><button class="btn" id="dCsv">CSVで書き出す</button><button class="btn danger" id="dClear">全員を削除</button>
+      <button class="btn primary" id="dAdd">乗務員を追加</button><button class="btn" id="dRand">ランダムに登録</button><button class="btn" id="dAuto">担当車を自動で割り当て</button><button class="btn" id="dTr">ランダムに転属</button><button class="btn" id="dTrH">転属履歴</button><button class="btn" id="dCsv">CSVで書き出す</button><button class="btn danger" id="dClear">全員を削除</button>
     </div>
     <div id="dTable"></div>`;
   $('#dDep').value = ad.depot; $('#dGen').value = ad.gender;
@@ -2078,6 +2161,8 @@ function admDrivers() {
   $('#dGen').onchange = (e) => { ad.gender = e.target.value; ad.page = 0; drawDrivers(); };
   $('#dAdd').onclick = () => editDriver(null);
   $('#dRand').onclick = randomDrivers;
+  $('#dTr').onclick = () => transferDialog(() => { if ($('#dTable')) drawDrivers(); });
+  $('#dTrH').onclick = transferHistory;
   $('#dAuto').onclick = () => { const n = autoAssign(); saveFleet(); toast(n ? `${n}人に担当車を割り当てました（運用数を超える車両は予備車として担当なしのままにします）` : '担当車が未設定の乗務員はいません'); drawDrivers(); };
   $('#dCsv').onclick = () => { const today = dateStr(new Date()); download('drivers.csv', '\ufeff' + [csvLine(['社員番号', '姓', '名', '性別', '生年月日', '年齢', '所属', '入社日', '運転技術', '接客態度', '担当車', '状態', '備考']), ...state.fleet.drivers.map((d) => csvLine([d.empNo, d.sur, d.given, d.gender, d.birth, ageOn(d.birth, today), depotName(d.depot), d.hired, d.skill, d.service, state.fleet.vehicles.find((v) => v.id === d.vehicleId)?.no || '', d.status, d.note]))].join('\n'), 'text/csv'); };
   $('#dClear').onclick = async () => { if (!state.fleet.drivers.length) return; if (!(await confirmBox(`登録されている乗務員 ${state.fleet.drivers.length}人をすべて削除します。元に戻せません。`, '全員を削除する'))) return; state.fleet.drivers = []; saveFleet(); toast('乗務員を全員削除しました'); admDrivers(); };
@@ -2492,7 +2577,7 @@ function admSettings() {
   $('#mdImport').onclick = () => importCsv('modelCsv', parseModelCSV, '車種テンプレート');
   const plr = $('#plReset'); if (plr) plr.onclick = () => { LS.del('plateCsv'); loadRefData(); toast('元のナンバー表に戻しました'); admSettings(); };
   const mdr = $('#mdReset'); if (mdr) mdr.onclick = () => { LS.del('modelCsv'); loadRefData(); toast('元の車種テンプレートに戻しました'); admSettings(); };
-  const bundle = () => ({ format: 'ichika-fleet', version: 2, exportedAt: new Date().toISOString(), vehicles: state.fleet.vehicles, drivers: state.fleet.drivers, duties: state.fleet.duties, dutySrc: state.fleet.dutySrc, temps: state.temps, settings: state.settings, plateCsv: LS.get('plateCsv', null) || undefined, modelCsv: LS.get('modelCsv', null) || undefined });
+  const bundle = () => ({ format: 'ichika-fleet', version: 2, exportedAt: new Date().toISOString(), vehicles: state.fleet.vehicles, drivers: state.fleet.drivers, duties: state.fleet.duties, dutySrc: state.fleet.dutySrc, transfers: state.fleet.transfers || [], temps: state.temps, settings: state.settings, plateCsv: LS.get('plateCsv', null) || undefined, modelCsv: LS.get('modelCsv', null) || undefined });
   $('#exJson').onclick = () => download(`一花交通_事業者データ_${dateStr(new Date())}.json`, JSON.stringify(bundle(), null, 1));
   $('#exFleet').onclick = () => download('fleet.js', `/* 一花交通 事業者データ（公開用）。事業者用ページの「公開用 fleet.js を書き出す」で作成。 */\nwindow.FLEET_DATA = ${JSON.stringify(bundle())};\n`, 'text/javascript');
   $('#imJson').onclick = async () => {
@@ -2500,7 +2585,7 @@ function admSettings() {
     try {
       const o = JSON.parse(txt); if (!Array.isArray(o.vehicles) || !Array.isArray(o.drivers)) throw new Error();
       if (!(await confirmBox(`車両 ${o.vehicles.length}台・乗務員 ${o.drivers.length}人・臨時便 ${(o.temps || []).length}本のデータで、いまのデータを置き換えます。`, '置き換える'))) return;
-      state.temps = o.temps || []; state.fleet = { vehicles: o.vehicles, drivers: o.drivers, duties: Array.isArray(o.duties) ? o.duties : undefined, dutySrc: o.dutySrc }; syncDuties(); if (o.settings) { LS.set('settings', o.settings); state.settings = loadSettings(); }
+      state.temps = o.temps || []; state.fleet = { vehicles: o.vehicles, drivers: o.drivers, duties: Array.isArray(o.duties) ? o.duties : undefined, dutySrc: o.dutySrc, transfers: o.transfers || [] }; syncDuties(); if (o.settings) { LS.set('settings', o.settings); state.settings = loadSettings(); }
       if (o.plateCsv) LS.set('plateCsv', o.plateCsv); if (o.modelCsv) LS.set('modelCsv', o.modelCsv); loadRefData();
       LS.set('fleet', state.fleet); LS.set('temps', state.temps); LS.set('settings', state.settings); bump(); toast('バックアップを読み込みました'); admSettings();
     } catch { toast('読み込めませんでした。このアプリで書き出したJSONを選んでください'); }
